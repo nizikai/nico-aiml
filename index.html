@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Face Tracking Camera + Spline</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="video-overlay">
+        <video id="videoFeed" autoplay></video>
+        <canvas id="outputCanvas"></canvas>
+    </div>
+    <canvas id="canvas3d"></canvas>
+
+        <script src="app.js"></script>
+    <script src="faceTracking.js"></script>
+
+    <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+    <script type="module">
+        import { Application } from 'https://unpkg.com/@splinetool/runtime@1.9.54/build/runtime.js';
+        window.Application = Application;
+    </script>
+</body>
+</html>

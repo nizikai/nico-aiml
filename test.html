@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face & Pose Tracking + Spline</title>
+    
+    <!-- External Dependencies -->
+    <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+    <!-- OpenCV is loaded asynchronously at the bottom -->
+
+    <style>
+        /* --- MERGED CSS --- */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: monospace;
+        }
+
+        /* PRELOADER STYLES */
+        #loader-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #000;
+            z-index: 9999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 1s ease-out;
+        }
+        
+        #loader-overlay.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* SPLINE CANVAS */
+        #canvas3d {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 1;
+        }
+
+        /* UNIFIED CAMERA PREVIEW (Top Left) */
+        #video-overlay {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 320px;
+            height: 240px; /* Aspect ratio might adjust in JS */
+            z-index: 100;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            background: #000;
+        }
+
+        #videoFeed {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0; /* Hidden, we draw to canvas instead */
+            transform: scaleX(-1);
+        }
+
+        #outputCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            /* Canvas draws the video + face box */
+        }
+
+        /* POSE RESULTS OVERLAY (Inside video-overlay) */
+        #label-container {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px;
+            box-sizing: border-box;
+            color: white;
+            font-size: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            backdrop-filter: blur(2px);
+        }
+
+        .label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .label-bar-bg {
+            width: 60px;
+            height: 4px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .label-bar-fill {
+            height: 100%;
+            background: #4facfe;
+            width: 0%;
+            transition: width 0.1s linear;
+        }
+
+        /* HIDDEN POSE CANVAS (We don't show the skeleton to keep it simple) */
+        #poseCanvas {
+            display: none; 
+        }
+
+        .status-text {
+            color: #666;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 1. PRELOADER -->
+    <div id="loader-overlay">
+        <div style="text-align: center;">
+            <lottie-player 
+                src="preload.json" 
+                background="transparent" 
+                speed="1" 
+                style="width: 300px; height: 300px;" 
+                loop 
+                autoplay>
+            </lottie-player>
+            <div id="loading-text" style="color: white; margin-top: 20px;">Initializing Core Systems...</div>
+        </div>
+    </div>
+
+    <!-- 2. UNIFIED CAMERA UI & RESULTS -->
+    <div id="video-overlay">
+        <!-- The actual video element is shared but hidden -->
+        <video id="videoFeed" autoplay playsinline muted></video>
+        
+        <!-- Canvas for Face Tracking (Green Box) -->
+        <canvas id="outputCanvas"></canvas>
+        
+        <!-- Canvas for Pose Skeleton (Hidden per user request for simplicity, but logic remains) -->
+        <canvas id="poseCanvas"></canvas>
+
+        <!-- Pose Classification Results -->
+        <div id="label-container">
+            <!-- Labels injected by JS -->
+        </div>
+    </div>
+
+    <!-- 3. SPLINE SCENE -->
+    <canvas id="canvas3d"></canvas>
+
+
+    <!-- OPENCV LIBRARY (Async Load) -->
+    <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+
+    <!-- MAIN APPLICATION LOGIC -->
+    <script type="module">
+        import { Application } from 'https://unpkg.com/@splinetool/runtime@1.9.54/build/runtime.js';
+
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            FACE_CASCADE_URL: 'haarcascade_frontalface_default.xml',
+            SCENE_URL: 'https://prod.spline.design/yYS1xtlWqP5R7SwT/scene.splinecode',
+            CAMERA_ID: '56c30b36-44df-48b7-89f1-27070018dad0',
+            TM_MODEL_URL: "https://teachablemachine.withgoogle.com/models/odgkAY81j/"
+        };
+
+        const params = {
+            xSensitivity: 5,
+            ySensitivity: 7,
+            confidenceThreshold: 0.1
+        };
+
+        // --- STATE VARIABLES ---
+        const state = {
+            cvReady: false,
+            splineReady: false,
+            tmReady: false,
+            cameraReady: false,
+            appStarted: false,
+            rightHandTriggered: false // Track if Key U was already pressed
+        };
+
+        // DOM Elements
+        let video, outputCanvas, outputCtx; // Face Tracking
+        let poseCanvas, poseCtx, labelContainer; // Pose Tracking
+        let classifier; // OpenCV Classifier
+        let tmModel, maxPredictions; // Teachable Machine
+
+        // --- 1. INITIALIZATION ORCHESTRATOR ---
+        
+        async function checkAppReady() {
+            const statusDiv = document.getElementById('loading-text');
+            
+            if (!state.cvReady) statusDiv.innerText = "Loading OpenCV...";
+            else if (!state.splineReady) statusDiv.innerText = "Loading 3D Scene...";
+            else if (!state.tmReady) statusDiv.innerText = "Loading AI Models...";
+            else if (!state.cameraReady) statusDiv.innerText = "Accessing Camera...";
+
+            // Check if everything is loaded
+            if (state.cvReady && state.splineReady && state.tmReady && state.cameraReady && !state.appStarted) {
+                state.appStarted = true;
+                statusDiv.innerText = "Ready!";
+                
+                // Slight delay for effect
+                setTimeout(() => {
+                    document.getElementById('loader-overlay').classList.add('fade-out');
+                    // Start the loops
+                    requestAnimationFrame(processFaceTracking);
+                    requestAnimationFrame(processPoseTracking);
+                }, 1000);
+            }
+        }
+
+        // --- 2. SPLINE SETUP ---
+
+        async function initSpline() {
+            const canvas = document.getElementById('canvas3d');
+            window.splineApp = new Application(canvas, {
+                controls: false,
+                autoRender: true,
+                autoResize: true
+            });
+
+            try {
+                await window.splineApp.load(CONFIG.SCENE_URL);
+                
+                // Find Camera
+                let camera = window.splineApp.findObjectById(CONFIG.CAMERA_ID);
+                if (!camera) {
+                    const objects = window.splineApp.getAllObjects();
+                    camera = objects.find(obj => obj.type.includes('Camera'));
+                }
+
+                if (camera) {
+                    window.splineCamera = camera;
+                    // Disable default controls so we can override them
+                    if(camera.controls) camera.controls.enabled = false;
+                }
+                
+                state.splineReady = true;
+                checkAppReady();
+            } catch (err) {
+                console.error("Spline Load Error:", err);
+            }
+        }
+
+        // Helper to safely set spline variable
+        function setSplineVariable(name, value) {
+            if (window.splineApp && typeof window.splineApp.setVariable === 'function') {
+                try {
+                    window.splineApp.setVariable(name, value);
+                } catch (e) {
+                    // Variable might not exist in scene, ignore
+                }
+            }
+        }
+
+        // --- KEYSTROKE EMULATION ---
+        function triggerKeyU() {
+            console.log("Triggering Key U (Emulation)");
+            
+            // Create the Event Object
+            const eventDown = new KeyboardEvent('keydown', {
+                key: 'u',
+                code: 'KeyU',
+                keyCode: 85,
+                which: 85,
+                bubbles: true,
+                cancelable: true,
+                view: window
+            });
+
+            // Dispatch to both Window and Canvas to ensure Spline catches it
+            window.dispatchEvent(eventDown);
+            const canvas = document.getElementById('canvas3d');
+            if(canvas) canvas.dispatchEvent(eventDown);
+
+            // Simulate KeyUp shortly after
+            setTimeout(() => {
+                const eventUp = new KeyboardEvent('keyup', {
+                    key: 'u',
+                    code: 'KeyU',
+                    keyCode: 85,
+                    which: 85,
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                });
+                window.dispatchEvent(eventUp);
+                if(canvas) canvas.dispatchEvent(eventUp);
+            }, 1000);
+        }
+
+        // --- 3. TEACHABLE MACHINE SETUP ---
+
+        async function initTeachableMachine() {
+            try {
+                const modelURL = CONFIG.TM_MODEL_URL + "model.json";
+                const metadataURL = CONFIG.TM_MODEL_URL + "metadata.json";
+
+                tmModel = await tmPose.load(modelURL, metadataURL);
+                maxPredictions = tmModel.getTotalClasses();
+
+                // Setup Labels
+                labelContainer = document.getElementById("label-container");
+                labelContainer.innerHTML = ''; // Clear init
+                
+                for (let i = 0; i < maxPredictions; i++) {
+                    // Create structured HTML for labels (Text + Bar)
+                    const div = document.createElement("div");
+                    div.className = "label-row";
+                    div.innerHTML = `
+                        <span class="label-text">Loading...</span>
+                        <div class="label-bar-bg">
+                            <div class="label-bar-fill"></div>
+                        </div>
+                    `;
+                    labelContainer.appendChild(div);
+                }
+                
+                state.tmReady = true;
+                checkAppReady();
+            } catch (err) {
+                console.error("TM Load Error:", err);
+            }
+        }
+
+        // --- 4. OPENCV SETUP ---
+        window.onOpenCvReady = async function() {
+            try {
+                await new Promise(resolve => {
+                    const check = () => {
+                        if (window.cv && cv.CascadeClassifier) resolve();
+                        else setTimeout(check, 100);
+                    };
+                    check();
+                });
+
+                classifier = new cv.CascadeClassifier();
+                const response = await fetch(CONFIG.FACE_CASCADE_URL);
+                const buffer = await response.arrayBuffer();
+                const data = new Uint8Array(buffer);
+                
+                cv.FS_createDataFile('/', CONFIG.FACE_CASCADE_URL, data, true, false, false);
+                classifier.load(CONFIG.FACE_CASCADE_URL);
+
+                state.cvReady = true;
+                checkAppReady();
+            } catch (err) {
+                console.error("OpenCV Load Error:", err);
+            }
+        };
+
+        // --- 5. WEBCAM SETUP (SHARED) ---
+
+        async function initWebcam() {
+            video = document.getElementById('videoFeed');
+            
+            outputCanvas = document.getElementById('outputCanvas');
+            outputCtx = outputCanvas.getContext('2d');
+            
+            // We still init this context even if hidden, in case we want to re-enable
+            poseCanvas = document.getElementById('poseCanvas');
+            poseCtx = poseCanvas.getContext('2d');
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                });
+                
+                video.srcObject = stream;
+                
+                await new Promise(resolve => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+
+                outputCanvas.width = video.videoWidth;
+                outputCanvas.height = video.videoHeight;
+                // Match sizes just in case
+                poseCanvas.width = video.videoWidth;
+                poseCanvas.height = video.videoHeight;
+
+                state.cameraReady = true;
+                checkAppReady();
+
+            } catch (err) {
+                console.error("Webcam Error:", err);
+                alert("Camera access denied or unavailable.");
+            }
+        }
+
+        // --- 6. RUNTIME LOOPS ---
+
+        // Loop A: Face Tracking (OpenCV) - Draws the Video + Box
+        function processFaceTracking() {
+            if (!state.appStarted) return;
+
+            try {
+                // 1. Draw Video Mirrored
+                outputCtx.save();
+                outputCtx.scale(-1, 1);
+                outputCtx.drawImage(video, -outputCanvas.width, 0, outputCanvas.width, outputCanvas.height);
+                outputCtx.restore();
+
+                let src = cv.imread(outputCanvas);
+                let gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+                if (classifier && !classifier.empty()) {
+                    const faces = new cv.RectVector();
+                    classifier.detectMultiScale(gray, faces, 1.1, 3, 0, new cv.Size(100, 100));
+
+                    if (faces.size() > 0) {
+                        let largestFace = faces.get(0);
+                        let maxArea = largestFace.width * largestFace.height;
+                        
+                        for (let i = 1; i < faces.size(); i++) {
+                            const face = faces.get(i);
+                            const area = face.width * face.height;
+                            if (area > maxArea) {
+                                largestFace = face;
+                                maxArea = area;
+                            }
+                        }
+
+                        // Update Camera
+                        const centerX = largestFace.x + largestFace.width / 2;
+                        const centerY = largestFace.y + largestFace.height / 2;
+                        const normX = (centerX / outputCanvas.width) * 2 - 1;
+                        const normY = (centerY / outputCanvas.height) * 2 - 1;
+
+                        updateSplineCamera(normX, normY);
+
+                        // Draw Debug Rectangle (Green)
+                        const point1 = new cv.Point(largestFace.x, largestFace.y);
+                        const point2 = new cv.Point(largestFace.x + largestFace.width, largestFace.y + largestFace.height);
+                        cv.rectangle(src, point1, point2, [0, 255, 0, 255], 2);
+                    }
+                    faces.delete();
+                }
+
+                // Show result on the main canvas
+                cv.imshow('outputCanvas', src);
+                src.delete();
+                gray.delete();
+
+            } catch (err) {
+                // Suppress frame errors
+            }
+
+            requestAnimationFrame(processFaceTracking);
+        }
+
+        // Loop B: Pose Tracking (Teachable Machine) - Updates Text Only
+        async function processPoseTracking() {
+            if (!state.appStarted) return;
+
+            try {
+                // Use the video element directly
+                const { pose, posenetOutput } = await tmModel.estimatePose(video);
+                const prediction = await tmModel.predict(posenetOutput);
+
+                // Update Labels UI
+                const container = document.getElementById("label-container");
+                if (container.children.length === maxPredictions) {
+                    for (let i = 0; i < maxPredictions; i++) {
+                        const row = container.children[i];
+                        const prob = prediction[i].probability;
+                        let originalClassName = prediction[i].className;
+                        let displayClassName = originalClassName;
+
+                        // FIX FLIPPED LABELS
+                        if (originalClassName.includes("Left")) {
+                            displayClassName = originalClassName.replace("Left", "Right");
+                        } else if (originalClassName.includes("Right")) {
+                            displayClassName = originalClassName.replace("Right", "Left");
+                        } else if (originalClassName.includes("left")) {
+                            displayClassName = originalClassName.replace("left", "right");
+                        } else if (originalClassName.includes("right")) {
+                            displayClassName = originalClassName.replace("right", "left");
+                        }
+
+                        // TRIGGER LOGIC: Check for "Right"
+                        if (displayClassName.includes("Right") || displayClassName.includes("right")) {
+                            
+                            if (prob > 0.85) {
+                                // 1. Set Variable
+
+                                // 2. Trigger Key U (Only once per activation)
+                                if (!state.rightHandTriggered) {
+                                    triggerKeyU();
+                                    state.rightHandTriggered = true;
+                                }
+
+                            } else {
+                                state.rightHandTriggered = false; 
+                            }
+                        }
+                        
+                        // Update UI Text
+                        const textSpan = row.querySelector('.label-text');
+                        textSpan.innerText = `${displayClassName}: ${(prob * 100).toFixed(0)}%`;
+                        
+                        // Update Bar Width
+                        const barFill = row.querySelector('.label-bar-fill');
+                        barFill.style.width = `${prob * 100}%`;
+                        
+                        // Highlight if active
+                        if(prob > 0.8) {
+                            textSpan.style.color = '#4facfe';
+                            textSpan.style.fontWeight = 'bold';
+                        } else {
+                            textSpan.style.color = 'white';
+                            textSpan.style.fontWeight = 'normal';
+                        }
+                    }
+                }
+
+                // We are NOT drawing the skeleton (drawPose) to keep the UI simple (Single Preview)
+
+            } catch (err) {
+                console.error("Pose Error", err);
+            }
+
+            requestAnimationFrame(processPoseTracking);
+        }
+
+        // Spline Camera Logic
+        function updateSplineCamera(normalizedX, normalizedY) {
+            if (!window.splineCamera) return;
+
+            if (!window.cameraBaseRotation) {
+                window.cameraBaseRotation = {
+                    x: window.splineCamera.rotation.x,
+                    y: window.splineCamera.rotation.y
+                };
+            }
+
+            const baseRotX = window.cameraBaseRotation.x;
+            const baseRotY = window.cameraBaseRotation.y;
+
+            const rotationStrengthX = 0.1 * params.xSensitivity;
+            const rotationStrengthY = 0.07 * params.ySensitivity;
+
+            const targetRotY = baseRotY + (-normalizedX * rotationStrengthX); 
+            const targetRotX = baseRotX + (-normalizedY * rotationStrengthY);
+
+            const lerp = params.confidenceThreshold;
+
+            window.splineCamera.rotation.y += (targetRotY - window.splineCamera.rotation.y) * lerp;
+            window.splineCamera.rotation.x += (targetRotX - window.splineCamera.rotation.x) * lerp;
+        }
+
+        initSpline();
+        initTeachableMachine();
+        initWebcam(); 
+
+    </script>
+</body>
+</html>
