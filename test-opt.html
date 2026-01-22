@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Optimized Tracking + Spline</title>
+    
+    <!-- External Dependencies -->
+    <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+    
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: monospace;
+        }
+
+        /* PRELOADER */
+        #loader-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #000;
+            z-index: 9999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 1s ease-out;
+        }
+        
+        #loader-overlay.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* SPLINE CANVAS */
+        #canvas3d {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 1;
+        }
+
+        /* CAMERA UI */
+        #video-overlay {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 320px;
+            height: 240px;
+            z-index: 100;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            background: #000;
+        }
+
+        #videoFeed {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0; /* Hidden, we draw to canvas */
+        }
+
+        #outputCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* Mirror effect */
+        }
+
+        /* POSE RESULTS */
+        #label-container {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px;
+            box-sizing: border-box;
+            color: white;
+            font-size: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            backdrop-filter: blur(2px);
+        }
+
+        .label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .label-bar-bg {
+            width: 60px;
+            height: 4px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .label-bar-fill {
+            height: 100%;
+            background: #4facfe;
+            width: 0%;
+            transition: width 0.2s linear; /* Smooth transition */
+        }
+    </style>
+
+    <!-- 1. Define Callback BEFORE loading OpenCV -->
+    <script>
+        // Initialize global state for the module to pick up
+        window.appState = {
+            cvLoaded: false
+        };
+
+        function onOpenCvReady() {
+            window.appState.cvLoaded = true;
+            // Dispatch event for the module to listen to
+            window.dispatchEvent(new Event('opencv-ready'));
+        }
+    </script>
+</head>
+<body>
+
+    <!-- 2. PRELOADER -->
+    <div id="loader-overlay">
+        <div style="text-align: center;">
+            <lottie-player 
+                src="preload.json" 
+                background="transparent" 
+                speed="1" 
+                style="width: 300px; height: 300px;" 
+                loop 
+                autoplay>
+            </lottie-player>
+            <div id="loading-text" style="color: white; margin-top: 20px;">Initializing System...</div>
+        </div>
+    </div>
+
+    <!-- 3. UI & RESULTS -->
+    <div id="video-overlay">
+        <video id="videoFeed" autoplay playsinline muted></video>
+        <canvas id="outputCanvas"></canvas>
+        <div id="label-container"></div>
+    </div>
+
+    <!-- 4. SPLINE SCENE -->
+    <canvas id="canvas3d"></canvas>
+
+    <!-- 5. OFFSCREEN CANVAS (Optimization) -->
+    <canvas id="processingCanvas" width="160" height="120" style="display:none;"></canvas>
+
+    <!-- OPENCV LIBRARY -->
+    <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+
+    <!-- MAIN APP -->
+    <!-- Updated Spline Runtime Version to fix version mismatch warning -->
+    <script type="module">
+        import { Application } from 'https://unpkg.com/@splinetool/runtime@1.9.68/build/runtime.js';
+
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            FACE_CASCADE_URL: 'haarcascade_frontalface_default.xml',
+            SCENE_URL: 'https://prod.spline.design/yYS1xtlWqP5R7SwT/scene.splinecode',
+            CAMERA_ID: '56c30b36-44df-48b7-89f1-27070018dad0',
+            TM_MODEL_URL: "https://teachablemachine.withgoogle.com/models/odgkAY81j/"
+        };
+
+        const PARAMS = {
+            xSensitivity: 5,
+            ySensitivity: 7,
+            confidenceThreshold: 0.1,
+            scaleFactor: 4 
+        };
+
+        // --- STATE VARIABLES ---
+        const state = {
+            cvReady: false,
+            splineReady: false,
+            tmReady: false,
+            cameraReady: false,
+            appStarted: false,
+            rightHandTriggered: false,
+            currentFaceRect: null
+        };
+
+        // --- TIMING VARIABLES (Optimization) ---
+        let lastFaceTime = 0;
+        let lastPoseTime = 0;
+        const FACE_FPS = 50; // Cap face tracking at 20 FPS
+        const POSE_FPS = 4; // Cap pose tracking at 10 FPS
+        const faceInterval = 1000 / FACE_FPS;
+        const poseInterval = 1000 / POSE_FPS;
+
+        // DOM Elements
+        let video, outputCanvas, outputCtx; 
+        let processingCanvas, processingCtx; 
+        let classifier; 
+        let tmModel, maxPredictions; 
+
+        // --- 1. INITIALIZATION ORCHESTRATOR ---
+        async function checkAppReady() {
+            const statusDiv = document.getElementById('loading-text');
+            
+            if (!state.cvReady) statusDiv.innerText = "Loading OpenCV...";
+            else if (!state.splineReady) statusDiv.innerText = "Loading 3D Scene...";
+            else if (!state.tmReady) statusDiv.innerText = "Loading AI Models...";
+            else if (!state.cameraReady) statusDiv.innerText = "Accessing Camera...";
+
+            if (state.cvReady && state.splineReady && state.tmReady && state.cameraReady && !state.appStarted) {
+                state.appStarted = true;
+                statusDiv.innerText = "Ready!";
+                
+                setTimeout(() => {
+                    document.getElementById('loader-overlay').classList.add('fade-out');
+                    requestAnimationFrame(mainLoop);
+                }, 1000);
+            }
+        }
+
+        // --- 2. SPLINE SETUP ---
+        async function initSpline() {
+            const canvas = document.getElementById('canvas3d');
+            window.splineApp = new Application(canvas, {
+                controls: false,
+                autoRender: true,
+                autoResize: true
+            });
+
+            try {
+                await window.splineApp.load(CONFIG.SCENE_URL);
+                
+                let camera = window.splineApp.findObjectById(CONFIG.CAMERA_ID);
+                if (!camera) {
+                    const objects = window.splineApp.getAllObjects();
+                    camera = objects.find(obj => obj.type.includes('Camera'));
+                }
+
+                if (camera) {
+                    window.splineCamera = camera;
+                    if(camera.controls) camera.controls.enabled = false;
+                }
+                
+                state.splineReady = true;
+                checkAppReady();
+            } catch (err) {
+                console.error("Spline Load Error:", err);
+            }
+        }
+
+        // --- 3. TEACHABLE MACHINE SETUP ---
+        async function initTeachableMachine() {
+            try {
+                const modelURL = CONFIG.TM_MODEL_URL + "model.json";
+                const metadataURL = CONFIG.TM_MODEL_URL + "metadata.json";
+
+                tmModel = await tmPose.load(modelURL, metadataURL);
+                maxPredictions = tmModel.getTotalClasses();
+
+                const labelContainer = document.getElementById("label-container");
+                labelContainer.innerHTML = ''; 
+                
+                for (let i = 0; i < maxPredictions; i++) {
+                    const div = document.createElement("div");
+                    div.className = "label-row";
+                    div.innerHTML = `
+                        <span class="label-text">Loading...</span>
+                        <div class="label-bar-bg"><div class="label-bar-fill"></div></div>
+                    `;
+                    labelContainer.appendChild(div);
+                }
+                
+                state.tmReady = true;
+                checkAppReady();
+            } catch (err) {
+                console.error("TM Load Error:", err);
+            }
+        }
+
+        // --- 4. OPENCV SETUP ---
+        async function initOpenCv() {
+            // Wait for global flag or event
+            if (!window.appState.cvLoaded) {
+                await new Promise(resolve => window.addEventListener('opencv-ready', resolve));
+            }
+
+            try {
+                // Ensure cv is fully initialized
+                await new Promise(resolve => {
+                    const check = () => {
+                        if (window.cv && window.cv.CascadeClassifier) resolve();
+                        else setTimeout(check, 100);
+                    };
+                    check();
+                });
+
+                classifier = new cv.CascadeClassifier();
+                
+                // Fetch local XML 
+                try {
+                    const response = await fetch(CONFIG.FACE_CASCADE_URL);
+                    if(!response.ok) throw new Error("XML not found");
+                    const buffer = await response.arrayBuffer();
+                    const data = new Uint8Array(buffer);
+                    cv.FS_createDataFile('/', 'haarcascade_frontalface_default.xml', data, true, false, false);
+                    classifier.load('haarcascade_frontalface_default.xml');
+                } catch(e) {
+                    console.error("Could not load Haar Cascade XML. Ensure 'haarcascade_frontalface_default.xml' is in the root folder.");
+                }
+
+                state.cvReady = true;
+                checkAppReady();
+            } catch (err) {
+                console.error("OpenCV Logic Error:", err);
+            }
+        };
+
+        // --- 5. WEBCAM SETUP ---
+        async function initWebcam() {
+            video = document.getElementById('videoFeed');
+            
+            outputCanvas = document.getElementById('outputCanvas');
+            outputCtx = outputCanvas.getContext('2d', { willReadFrequently: true });
+            
+            processingCanvas = document.getElementById('processingCanvas');
+            processingCtx = processingCanvas.getContext('2d', { willReadFrequently: true });
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                });
+                
+                video.srcObject = stream;
+                
+                await new Promise(resolve => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+
+                outputCanvas.width = video.videoWidth;
+                outputCanvas.height = video.videoHeight;
+                
+                // Set scale factor
+                PARAMS.scaleFactor = video.videoWidth / processingCanvas.width;
+
+                state.cameraReady = true;
+                checkAppReady();
+
+            } catch (err) {
+                console.error("Webcam Error:", err);
+            }
+        }
+
+        // --- 6. KEYBOARD EMULATION ---
+        function triggerKeyU() {
+            const eventDown = new KeyboardEvent('keydown', {
+                key: 'u', code: 'KeyU', keyCode: 85, which: 85,
+                bubbles: true, cancelable: true, view: window
+            });
+            window.dispatchEvent(eventDown);
+            if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(eventDown);
+
+            setTimeout(() => {
+                const eventUp = new KeyboardEvent('keyup', {
+                    key: 'u', code: 'KeyU', keyCode: 85, which: 85,
+                    bubbles: true, cancelable: true, view: window
+                });
+                window.dispatchEvent(eventUp);
+                if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(eventUp);
+            }, 500);
+        }
+
+        // --- 7. MAIN RENDER LOOP ---
+        function mainLoop(timestamp) {
+            if (!state.appStarted) return;
+
+            // A. VISUALS (Run every frame)
+            outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+            
+            if (state.currentFaceRect) {
+                outputCtx.beginPath();
+                outputCtx.lineWidth = 2;
+                outputCtx.strokeStyle = "#00FF00";
+                outputCtx.rect(
+                    state.currentFaceRect.x, 
+                    state.currentFaceRect.y, 
+                    state.currentFaceRect.width, 
+                    state.currentFaceRect.height
+                );
+                outputCtx.stroke();
+            }
+
+            // B. FACE DETECTION (Throttled)
+            if (timestamp - lastFaceTime > faceInterval) {
+                detectFace();
+                lastFaceTime = timestamp;
+            }
+
+            // C. POSE DETECTION (Throttled)
+            if (timestamp - lastPoseTime > poseInterval) {
+                detectPose();
+                lastPoseTime = timestamp;
+            }
+
+            requestAnimationFrame(mainLoop);
+        }
+
+        // --- HELPER: FACE DETECTION ---
+        function detectFace() {
+            if (!classifier || classifier.empty()) return;
+
+            try {
+                // Downscale draw
+                processingCtx.drawImage(video, 0, 0, processingCanvas.width, processingCanvas.height);
+
+                let src = cv.imread(processingCanvas);
+                let gray = new cv.Mat();
+                
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+                let faces = new cv.RectVector();
+                
+                classifier.detectMultiScale(gray, faces, 1.1, 3, 0);
+
+                if (faces.size() > 0) {
+                    let largestFace = faces.get(0);
+                    let maxArea = largestFace.width * largestFace.height;
+                    
+                    for (let i = 1; i < faces.size(); i++) {
+                        const face = faces.get(i);
+                        const area = face.width * face.height;
+                        if (area > maxArea) {
+                            largestFace = face;
+                            maxArea = area;
+                        }
+                    }
+
+                    // Update State
+                    state.currentFaceRect = {
+                        x: largestFace.x * PARAMS.scaleFactor,
+                        y: largestFace.y * PARAMS.scaleFactor,
+                        width: largestFace.width * PARAMS.scaleFactor,
+                        height: largestFace.height * PARAMS.scaleFactor
+                    };
+
+                    // Update Spline
+                    const centerX = largestFace.x + largestFace.width / 2;
+                    const centerY = largestFace.y + largestFace.height / 2;
+                    
+                    const normX = (centerX / processingCanvas.width) * 2 - 1;
+                    const normY = (centerY / processingCanvas.height) * 2 - 1;
+
+                    updateSplineCamera(normX, normY);
+                }
+
+                src.delete();
+                gray.delete();
+                faces.delete();
+
+            } catch (e) {
+                // cv error suppression
+            }
+        }
+
+        // --- HELPER: POSE DETECTION ---
+        async function detectPose() {
+            if (!tmModel) return;
+
+            try {
+                const { pose, posenetOutput } = await tmModel.estimatePose(video);
+                const prediction = await tmModel.predict(posenetOutput);
+
+                const container = document.getElementById("label-container");
+                
+                for (let i = 0; i < maxPredictions; i++) {
+                    if (!container.children[i]) break;
+
+                    const prob = prediction[i].probability;
+                    let name = prediction[i].className;
+                    
+                    // Fix Mirror Labels
+                    if (name.includes("Left")) name = name.replace("Left", "Right");
+                    else if (name.includes("Right")) name = name.replace("Right", "Left");
+
+                    // Trigger Logic
+                    if ((name.includes("Right") || name.includes("right")) && prob > 0.90) {
+                        if (!state.rightHandTriggered) {
+                            triggerKeyU();
+                            state.rightHandTriggered = true;
+                        }
+                    } else if (name.includes("Right") || name.includes("right")) {
+                        if (prob < 0.85) state.rightHandTriggered = false;
+                    }
+
+                    // Update UI
+                    const row = container.children[i];
+                    row.querySelector('.label-text').innerText = `${name}: ${(prob * 100).toFixed(0)}%`;
+                    row.querySelector('.label-bar-fill').style.width = `${prob * 100}%`;
+                    
+                    const textEl = row.querySelector('.label-text');
+                    if(prob > 0.8) {
+                        textEl.style.color = '#4facfe';
+                        textEl.style.fontWeight = 'bold';
+                    } else {
+                        textEl.style.color = 'white';
+                        textEl.style.fontWeight = 'normal';
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // --- HELPER: SPLINE UPDATE ---
+        function updateSplineCamera(normalizedX, normalizedY) {
+            if (!window.splineCamera) return;
+
+            if (!window.cameraBaseRotation) {
+                window.cameraBaseRotation = {
+                    x: window.splineCamera.rotation.x,
+                    y: window.splineCamera.rotation.y
+                };
+            }
+
+            const baseRotX = window.cameraBaseRotation.x;
+            const baseRotY = window.cameraBaseRotation.y;
+
+            // UPDATED: Inverted X logic compared to previous version 
+            // because we are now detecting on raw (un-mirrored) video
+            const targetRotY = baseRotY + (normalizedX * 0.1 * PARAMS.xSensitivity); 
+            const targetRotX = baseRotX + (-normalizedY * 0.07 * PARAMS.ySensitivity);
+
+            // Lerp factor
+            const lerp = PARAMS.confidenceThreshold;
+
+            window.splineCamera.rotation.y += (targetRotY - window.splineCamera.rotation.y) * lerp;
+            window.splineCamera.rotation.x += (targetRotX - window.splineCamera.rotation.x) * lerp;
+        }
+
+        // START
+        initSpline();
+        initTeachableMachine();
+        initWebcam();
+        initOpenCv();
+
+    </script>
+</body>
+</html>
