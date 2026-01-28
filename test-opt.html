@@ -3,92 +3,76 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hand Unlock + Face Tracked Spline</title>
+    <title>3-Phase Interaction Logic</title>
     
     <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
     
     <style>
-        body {
-            margin: 0;
-            overflow: hidden;
-            background: #ffffff; /* White background for intro */
-            font-family: monospace;
-        }
+        body { margin: 0; overflow: hidden; background: #ffffff; font-family: monospace; }
 
-        /* 1. WHITE OVERLAY (Intro Animation) */
         #loader-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            background-color: #ffffff;
-            z-index: 9998; /* Below camera, above scene */
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background-color: #ffffff; z-index: 9998;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
             transition: opacity 1s ease-out;
         }
-        
-        #loader-overlay.fade-out {
-            opacity: 0;
-            pointer-events: none;
-        }
+        #loader-overlay.fade-out { opacity: 0; pointer-events: none; }
 
-        /* 2. SPLINE CANVAS */
-        #canvas3d {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            z-index: 1;
-        }
+        #canvas3d { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
 
-        /* 3. CAMERA UI (Bottom Center, Starts Hidden) */
+        /* --- VIDEO CONTAINER --- */
         #video-overlay {
-            position: fixed;
-            top: 30px;
-            left: 50%;
-            transform: translateX(-50%);
-            
-            width: 150px;
-            height: 150px;
-            
-            z-index: 9999; /* Highest priority */
+            position: fixed; top: 30px; right: 30px;
+            width: 160px; height: 120px;
+            z-index: 9999;
             border-radius: 12px;
             overflow: hidden;
             box-shadow: 0 10px 25px rgba(0,0,0,0.2);
-            background: #000;
-            border: 3px solid white;
-            
-            /* Start Invisible */
-            opacity: 0;
-            transition: opacity 0.8s ease-in-out;
+            background: #000; 
+            border: 2px solid white; 
+            opacity: 0; transform: translateY(-10px);
+            transition: opacity 1s ease, transform 1s ease;
         }
+        #video-overlay.visible { opacity: 1; transform: translateY(0); }
 
-        /* Class to fade camera in */
-        #video-overlay.visible {
-            opacity: 1;
-        }
+        #videoFeed { position: absolute; width: 1px; height: 1px; opacity: 0; }
+        #outputCanvas { display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 
-        #videoFeed {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            opacity: 0; /* Hide raw video */
+        /* --- HUD LAYER --- */
+        #hud-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10;
+            box-sizing: border-box;
+            transition: box-shadow 0.2s ease-out;
         }
+        /* VISUAL FEEDBACK */
+        #hud-layer.highlight-left { box-shadow: inset 15px 0 0 0 #F67D3E; }
+        #hud-layer.highlight-right { box-shadow: inset -15px 0 0 0 #F67D3E; }
+        #hud-layer.highlight-both { box-shadow: inset 0 0 0 8px #F67D3E; }
 
-        #outputCanvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            transform: scaleX(-1); /* Mirror effect */
+        /* --- PLACEHOLDER / ERROR MESSAGE --- */
+        #camera-msg {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #222; color: #888;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            text-align: center; font-size: 11px; padding: 10px; box-sizing: border-box;
+            z-index: 5; transition: opacity 0.5s ease;
         }
+        #camera-msg.hidden { opacity: 0; pointer-events: none; }
+        #camera-msg.error { background: #330000; color: #ff6b6b; font-weight: bold; }
+
+        #label-container {
+            position: absolute; bottom: 0; left: 0;
+            width: 100%; background: rgba(0, 0, 0, 0.85); padding: 8px; box-sizing: border-box;
+            color: white; font-size: 10px; display: flex; flex-direction: column; gap: 5px;
+            border-top: 1px solid rgba(255,255,255,0.2);
+            z-index: 20;
+        }
+        .label-row { display: flex; justify-content: space-between; align-items: center; }
+        .label-bar-bg { width: 50px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; overflow: hidden; }
+        .label-bar-fill { height: 100%; background: #F67D3E; width: 0%; transition: width 0.1s linear; }
     </style>
 
     <script>
@@ -102,23 +86,18 @@
 <body>
 
     <div id="loader-overlay">
-        <lottie-player 
-            id="intro-anim"
-            src="preload.json" 
-            background="transparent" 
-            speed="1" 
-            style="width: 75vmin; height: 75vmin;" 
-            autoplay>
-        </lottie-player>
+        <lottie-player id="intro-anim" src="preload.json" background="transparent" speed="1" style="width: 115vmin; height: 115vmin;"></lottie-player>
     </div>
 
     <div id="video-overlay">
         <video id="videoFeed" autoplay playsinline muted></video>
         <canvas id="outputCanvas"></canvas>
+        <div id="camera-msg"><span>Allow Camera<br>to Start</span></div>
+        <div id="hud-layer"></div>
+        <div id="label-container" style="display: none;"></div>
     </div>
 
     <canvas id="canvas3d"></canvas>
-
     <canvas id="processingCanvas" width="160" height="120" style="display:none;"></canvas>
 
     <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
@@ -126,32 +105,8 @@
     <script type="module">
         import { Application } from 'https://unpkg.com/@splinetool/runtime@1.9.68/build/runtime.js';
 
-        // --- LOTTIE 90% TRIGGER LOGIC ---
-        const animPlayer = document.getElementById('intro-anim');
-        const videoOverlay = document.getElementById('video-overlay');
-        let cameraShown = false;
+        const DEBUG_MODE = false; 
 
-        if (animPlayer) {
-            // Listen for frame updates to trigger camera reveal
-            animPlayer.addEventListener('frame', (e) => {
-                // e.detail.seek represents percentage (0-100)
-                if (e.detail.seek > 70 && !cameraShown) {
-                    videoOverlay.classList.add('visible');
-                    cameraShown = true;
-                }
-            });
-
-            // Fallback in case frame skip happens
-            animPlayer.addEventListener('complete', () => {
-                if (!cameraShown) {
-                    videoOverlay.classList.add('visible');
-                    cameraShown = true;
-                }
-            });
-        }
-        // --------------------------------
-
-        // CONFIG
         const CONFIG = {
             FACE_CASCADE_URL: 'haarcascade_frontalface_default.xml',
             SCENE_URL: 'https://prod.spline.design/yYS1xtlWqP5R7SwT/scene.splinecode',
@@ -160,229 +115,193 @@
         };
 
         const PARAMS = {
-            xSensitivity: 5,
-            ySensitivity: 7,
-            confidenceThreshold: 0.1,
-            scaleFactor: 1
+            xSensitivity: 5, 
+            ySensitivity: 7, 
+            positionSensitivity: 100,
+            confidenceThreshold: 0.25, 
+            scaleFactor: 4,
+            
+            validityTimer: 500, 
+            cooldownTimer: 5000  // 5 seconds
         };
 
-        // STATE
         const state = {
-            cvReady: false,
-            splineReady: false,
-            tmReady: false,
-            cameraReady: false,
-            appLoaded: false,       
-            experienceStarted: false, // Wait for unlock
-            rightHandTriggered: false,
-            currentFaceRect: null
+            cvReady: false, splineReady: false, tmReady: false, cameraReady: false,
+            appLoaded: false, experienceStarted: false, 
+            currentFaceRect: null, inputBlockEndTime: 0,
+            
+            // Interaction States
+            poseHoldStartTime: 0,
+            currentHeldPose: null,
+            
+            // Game Phase States
+            ignoreInputsUntil: 0,   // For the 5s cooldown
+            hasTriggeredAction: false // Ensures we only trigger once per hold
         };
 
-        // TIMING
         let lastFaceTime = 0;
         let lastPoseTime = 0;
-        const FACE_FPS = 30; 
-        const POSE_FPS = 10; 
+        const FACE_FPS = 15; 
+        const POSE_FPS = 10;
         const faceInterval = 1000 / FACE_FPS;
         const poseInterval = 1000 / POSE_FPS;
 
-        // DOM Elements
         let video, outputCanvas, outputCtx; 
         let processingCanvas, processingCtx; 
-        let classifier; 
-        let tmModel, maxPredictions; 
+        let classifier, tmModel, maxPredictions; 
+        let hudLayer, cameraMsg;
 
-        // --- 1. INITIALIZATION ---
-        async function checkAppReady() {
-            if (state.cvReady && state.splineReady && state.tmReady && state.cameraReady && !state.appLoaded) {
-                state.appLoaded = true;
-                // Start tracking loop immediately (runs behind white screen)
-                requestAnimationFrame(mainLoop);
-            }
+        async function startAppFlow() {
+            await initWebcam();
+            const anim = document.getElementById('intro-anim');
+            if(anim) anim.play();
+            
+            hudLayer = document.getElementById('hud-layer');
+            cameraMsg = document.getElementById('camera-msg');
+
+            initSpline();
+            initTeachableMachine();
+            initOpenCv();
+            setTimeout(() => {
+                const overlay = document.getElementById('video-overlay');
+                if(overlay) overlay.classList.add('visible');
+            }, 5000);
         }
 
-        // --- 2. SPLINE ---
-        async function initSpline() {
-            const canvas = document.getElementById('canvas3d');
-            window.splineApp = new Application(canvas, {
-                controls: false,
-                autoRender: true,
-                autoResize: true
-            });
-
-            try {
-                await window.splineApp.load(CONFIG.SCENE_URL);
-                
-                let camera = window.splineApp.findObjectById(CONFIG.CAMERA_ID);
-                if (!camera) {
-                    const objects = window.splineApp.getAllObjects();
-                    camera = objects.find(obj => obj.type.includes('Camera'));
-                }
-
-                if (camera) {
-                    window.splineCamera = camera;
-                    if(camera.controls) camera.controls.enabled = false;
-                }
-                
-                state.splineReady = true;
-                checkAppReady();
-            } catch (err) {
-                console.error("Spline Load Error:", err);
-            }
-        }
-
-        // --- 3. TEACHABLE MACHINE ---
-        async function initTeachableMachine() {
-            try {
-                const modelURL = CONFIG.TM_MODEL_URL + "model.json";
-                const metadataURL = CONFIG.TM_MODEL_URL + "metadata.json";
-
-                tmModel = await tmPose.load(modelURL, metadataURL);
-                maxPredictions = tmModel.getTotalClasses();
-                state.tmReady = true;
-                checkAppReady();
-            } catch (err) {
-                console.error("TM Load Error:", err);
-            }
-        }
-
-        // --- 4. OPENCV ---
-        async function initOpenCv() {
-            if (!window.appState.cvLoaded) {
-                await new Promise(resolve => window.addEventListener('opencv-ready', resolve));
-            }
-
-            try {
-                await new Promise(resolve => {
-                    const check = () => {
-                        if (window.cv && window.cv.CascadeClassifier) resolve();
-                        else setTimeout(check, 100);
-                    };
-                    check();
-                });
-
-                classifier = new cv.CascadeClassifier();
-                
-                try {
-                    const response = await fetch(CONFIG.FACE_CASCADE_URL);
-                    if(!response.ok) throw new Error("XML not found");
-                    const buffer = await response.arrayBuffer();
-                    const data = new Uint8Array(buffer);
-                    cv.FS_createDataFile('/', 'haarcascade_frontalface_default.xml', data, true, false, false);
-                    classifier.load('haarcascade_frontalface_default.xml');
-                } catch(e) {}
-
-                state.cvReady = true;
-                checkAppReady();
-            } catch (err) {}
-        };
-
-        // --- 5. WEBCAM ---
         async function initWebcam() {
             video = document.getElementById('videoFeed');
             outputCanvas = document.getElementById('outputCanvas');
             outputCtx = outputCanvas.getContext('2d', { willReadFrequently: true });
             processingCanvas = document.getElementById('processingCanvas');
             processingCtx = processingCanvas.getContext('2d', { willReadFrequently: true });
+            cameraMsg = document.getElementById('camera-msg');
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        facingMode: 'user',
-                        width: { ideal: 256 },
-                        height: { ideal: 256 }
-                    }
+                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
                 });
-                
                 video.srcObject = stream;
-                
-                await new Promise(resolve => {
-                    video.onloadedmetadata = () => {
-                        video.play();
-                        resolve();
-                    };
-                });
+                await new Promise(r => { video.onloadedmetadata = () => { video.play(); r(); } });
 
                 outputCanvas.width = video.videoWidth;
                 outputCanvas.height = video.videoHeight;
                 PARAMS.scaleFactor = video.videoWidth / processingCanvas.width;
-
-                state.cameraReady = true;
-                checkAppReady();
-
-            } catch (err) {
-                console.error("Webcam Error:", err);
+                state.cameraReady = true; 
+                if(cameraMsg) cameraMsg.classList.add('hidden');
+            } catch (err) { 
+                console.error("Webcam Error", err);
+                if(cameraMsg) {
+                    cameraMsg.innerHTML = "<span>Please enable Camera.<br>to continue.</span>";
+                    cameraMsg.classList.add('error');
+                }
             }
         }
 
-        // --- 6. UNLOCK & TRIGGER ---
+        async function initSpline() {
+            const canvas = document.getElementById('canvas3d');
+            window.splineApp = new Application(canvas, { controls: false, autoRender: true, autoResize: true });
+            try {
+                await window.splineApp.load(CONFIG.SCENE_URL);
+                let camera = window.splineApp.findObjectById(CONFIG.CAMERA_ID);
+                if (!camera) camera = window.splineApp.getAllObjects().find(obj => obj.type.includes('Camera'));
+                if (camera) { window.splineCamera = camera; if(camera.controls) camera.controls.enabled = false; }
+                state.splineReady = true; checkAppReady();
+            } catch (err) { console.error("Spline Error", err); }
+        }
+
+        async function initTeachableMachine() {
+            try {
+                tmModel = await tmPose.load(CONFIG.TM_MODEL_URL + "model.json", CONFIG.TM_MODEL_URL + "metadata.json");
+                maxPredictions = tmModel.getTotalClasses();
+                if (DEBUG_MODE) {
+                    const labelContainer = document.getElementById("label-container");
+                    labelContainer.style.display = "flex"; labelContainer.innerHTML = ''; 
+                    for (let i = 0; i < maxPredictions; i++) {
+                        const div = document.createElement("div"); div.className = "label-row";
+                        div.innerHTML = `<span class="label-text" style="width: 50px;">Load...</span><div class="label-bar-bg"><div class="label-bar-fill"></div></div>`;
+                        labelContainer.appendChild(div);
+                    }
+                }
+                state.tmReady = true; checkAppReady();
+            } catch (err) { console.error("TM Error", err); }
+        }
+
+        async function initOpenCv() {
+            if (!window.appState.cvLoaded) await new Promise(r => window.addEventListener('opencv-ready', r));
+            try {
+                await new Promise(r => { const c = () => (window.cv && window.cv.CascadeClassifier) ? r() : setTimeout(c, 100); c(); });
+                classifier = new cv.CascadeClassifier();
+                try {
+                    const r = await fetch(CONFIG.FACE_CASCADE_URL);
+                    if(!r.ok) throw new Error("XML missing");
+                    const b = await r.arrayBuffer();
+                    cv.FS_createDataFile('/', 'haarcascade_frontalface_default.xml', new Uint8Array(b), true, false, false);
+                    classifier.load('haarcascade_frontalface_default.xml');
+                } catch(e) {}
+                state.cvReady = true; checkAppReady();
+            } catch (err) {}
+        }
+
+        async function checkAppReady() {
+            if (state.cvReady && state.splineReady && state.tmReady && state.cameraReady && !state.appLoaded) {
+                state.appLoaded = true;
+                // Initial block to let everything settle
+                state.inputBlockEndTime = Date.now() + 6000;
+                requestAnimationFrame(mainLoop);
+            }
+        }
+
+        // --- PHASE 2: UNLOCK & START COOLDOWN ---
         function unlockExperience() {
             state.experienceStarted = true;
             document.getElementById('loader-overlay').classList.add('fade-out');
-            console.log("Experience Unlocked");
+            
+            // RULE 2: Ignore all input for 5 seconds after unlock
+            state.ignoreInputsUntil = Date.now() + PARAMS.cooldownTimer;
+            console.log("UNLOCKED! Ignoring inputs for 5s...");
         }
 
-        function triggerKeyU() {
-            // Only allow interaction if unlocked
-            if(!state.experienceStarted) return;
+        // --- GENERIC KEY TRIGGER FUNCTION ---
+        // triggers '1', '2', or '3'
+        function triggerKey(keyChar) {
+            const keyCodeMap = { '1': 49, '2': 50, '3': 51 };
+            const codeMap = { '1': 'Digit1', '2': 'Digit2', '3': 'Digit3' };
+            
+            const kCode = keyCodeMap[keyChar];
+            const code = codeMap[keyChar];
 
-            const eventDown = new KeyboardEvent('keydown', {
-                key: 'u', code: 'KeyU', keyCode: 85, which: 85,
-                bubbles: true, cancelable: true, view: window
-            });
-            window.dispatchEvent(eventDown);
-            if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(eventDown);
-
+            const down = new KeyboardEvent('keydown', { key: keyChar, code: code, keyCode: kCode, which: kCode, bubbles: true });
+            const up = new KeyboardEvent('keyup', { key: keyChar, code: code, keyCode: kCode, which: kCode, bubbles: true });
+            
+            window.dispatchEvent(down);
+            if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(down);
+            
             setTimeout(() => {
-                const eventUp = new KeyboardEvent('keyup', {
-                    key: 'u', code: 'KeyU', keyCode: 85, which: 85,
-                    bubbles: true, cancelable: true, view: window
-                });
-                window.dispatchEvent(eventUp);
-                if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(eventUp);
-            }, 500);
+                window.dispatchEvent(up);
+                if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(up);
+            }, 100); // Quick tap
+            
+            console.log(`TRIGGERED KEY: ${keyChar}`);
         }
 
-        // --- 7. MAIN LOOP ---
         function mainLoop(timestamp) {
             if (!state.appLoaded) return;
 
-            // Draw Webcam Feed
             outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
             
-            // Draw Face Box 
             if (state.currentFaceRect) {
-                outputCtx.beginPath();
-                outputCtx.lineWidth = 2;
-                outputCtx.strokeStyle = "#F67D3E"; 
-                outputCtx.rect(
-                    state.currentFaceRect.x, 
-                    state.currentFaceRect.y, 
-                    state.currentFaceRect.width, 
-                    state.currentFaceRect.height
-                );
+                outputCtx.beginPath(); outputCtx.lineWidth = 3; outputCtx.strokeStyle = "#F67D3E";
+                outputCtx.rect(state.currentFaceRect.x, state.currentFaceRect.y, state.currentFaceRect.width, state.currentFaceRect.height);
                 outputCtx.stroke();
             }
 
-            // Face Tracking
-            if (timestamp - lastFaceTime > faceInterval) {
-                detectFace();
-                lastFaceTime = timestamp;
-            }
-
-            // Pose Detection
-            if (timestamp - lastPoseTime > poseInterval) {
-                detectPose();
-                lastPoseTime = timestamp;
-            }
-
+            if (timestamp - lastFaceTime > faceInterval) { detectFace(); lastFaceTime = timestamp; }
+            if (timestamp - lastPoseTime > poseInterval) { detectPose(); lastPoseTime = timestamp; }
             requestAnimationFrame(mainLoop);
         }
 
-        // --- HELPER: FACE ---
         function detectFace() {
             if (!classifier || classifier.empty()) return;
-
             try {
                 processingCtx.drawImage(video, 0, 0, processingCanvas.width, processingCanvas.height);
                 let src = cv.imread(processingCanvas);
@@ -390,109 +309,158 @@
                 cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
                 let faces = new cv.RectVector();
                 
-                classifier.detectMultiScale(gray, faces, 1.1, 3, 0);
+                classifier.detectMultiScale(gray, faces, 1.1, 2, 0);
 
                 if (faces.size() > 0) {
-                    let largestFace = faces.get(0);
-                    let maxArea = largestFace.width * largestFace.height;
-                    
+                    let largest = faces.get(0);
+                    let maxArea = largest.width * largest.height;
                     for (let i = 1; i < faces.size(); i++) {
-                        const face = faces.get(i);
-                        const area = face.width * face.height;
-                        if (area > maxArea) {
-                            largestFace = face;
-                            maxArea = area;
-                        }
+                        const f = faces.get(i);
+                        const a = f.width * f.height;
+                        if (a > maxArea) { largest = f; maxArea = a; }
                     }
-
                     state.currentFaceRect = {
-                        x: largestFace.x * PARAMS.scaleFactor,
-                        y: largestFace.y * PARAMS.scaleFactor,
-                        width: largestFace.width * PARAMS.scaleFactor,
-                        height: largestFace.height * PARAMS.scaleFactor
+                        x: largest.x * PARAMS.scaleFactor,
+                        y: largest.y * PARAMS.scaleFactor,
+                        width: largest.width * PARAMS.scaleFactor,
+                        height: largest.height * PARAMS.scaleFactor
                     };
 
-                    // Only update Camera if experience started
                     if (state.experienceStarted) {
-                        const centerX = largestFace.x + largestFace.width / 2;
-                        const centerY = largestFace.y + largestFace.height / 2;
-                        
-                        const normX = (centerX / processingCanvas.width) * 2 - 1;
-                        const normY = (centerY / processingCanvas.height) * 2 - 1;
-
-                        updateSplineCamera(normX, normY);
+                        const cx = largest.x + largest.width / 2;
+                        const cy = largest.y + largest.height / 2;
+                        updateSplineCamera((cx / processingCanvas.width) * 2 - 1, (cy / processingCanvas.height) * 2 - 1);
                     }
                 }
                 src.delete(); gray.delete(); faces.delete();
             } catch (e) {}
         }
 
-        // --- HELPER: POSE ---
         async function detectPose() {
-            if (!tmModel) return;
+            if (!tmModel || Date.now() < state.inputBlockEndTime) return;
+            
+            // RULE 2 CHECK: If inside 5s cooldown, do nothing
+            if (state.experienceStarted && Date.now() < state.ignoreInputsUntil) return;
 
             try {
                 const { pose, posenetOutput } = await tmModel.estimatePose(video);
                 const prediction = await tmModel.predict(posenetOutput);
+                const container = document.getElementById("label-container");
                 
+                let detectedAnyValidPose = false;
+                let activeSide = null; 
+
                 for (let i = 0; i < maxPredictions; i++) {
                     const prob = prediction[i].probability;
                     let name = prediction[i].className;
-                    
-                    // Fix Mirror Labels
+                    // Mirroring Logic
                     if (name.includes("Left")) name = name.replace("Left", "Right");
                     else if (name.includes("Right")) name = name.replace("Right", "Left");
 
-                    // 1. UNLOCK LOGIC (Runs while locked)
-                    if (!state.experienceStarted) {
-                        // High confidence check for initial unlock
-                        if ((name.includes("Right") || name.includes("right")) && prob > 0.70) {
-                            unlockExperience();
-                        }
+                    if (DEBUG_MODE && container && container.children[i]) {
+                        const row = container.children[i];
+                        const pct = (prob * 100).toFixed(0);
+                        const txt = row.querySelector('.label-text');
+                        txt.innerText = `${name} ${pct}%`;
+                        row.querySelector('.label-bar-fill').style.width = `${pct}%`;
                     }
 
-                    // 2. GAME TRIGGER LOGIC (Runs while unlocked)
-                    else {
-                        if ((name.includes("Right") || name.includes("right")) && prob > 0.70) {
-                            if (!state.rightHandTriggered) {
-                                triggerKeyU();
-                                state.rightHandTriggered = true;
+                    if (prob > 0.99) {
+                        if (name.includes("Left")) activeSide = 'left';
+                        else if (name.includes("Right")) activeSide = 'right';
+                        else if (name.includes("Both")) activeSide = 'both';
+
+                        if (activeSide) {
+                            detectedAnyValidPose = true;
+
+                            // 1. Check if we are holding the SAME pose as previous frame
+                            if (state.currentHeldPose === name) {
+                                const timeHeld = Date.now() - state.poseHoldStartTime;
+                                
+                                // RULE 1: Must hold for 1.5s (PARAMS.validityTimer)
+                                if (timeHeld > PARAMS.validityTimer) {
+                                    
+                                    // VISUAL FEEDBACK (Only if valid)
+                                    if (hudLayer) {
+                                        if (activeSide === 'left') {
+                                            hudLayer.classList.add('highlight-left');
+                                            hudLayer.classList.remove('highlight-right', 'highlight-both');
+                                        } else if (activeSide === 'right') {
+                                            hudLayer.classList.add('highlight-right');
+                                            hudLayer.classList.remove('highlight-left', 'highlight-both');
+                                        } else if (activeSide === 'both') {
+                                            hudLayer.classList.add('highlight-both');
+                                            hudLayer.classList.remove('highlight-left', 'highlight-right');
+                                        }
+                                    }
+
+                                    // ACTION LOGIC
+                                    if (!state.experienceStarted) {
+                                        // PHASE 1: UNLOCK (Only Right Hand valid)
+                                        if (activeSide === 'right') {
+                                            unlockExperience();
+                                        }
+                                    } else {
+                                        // PHASE 3: INTERACTION (Prevent rapid firing with hasTriggeredAction)
+                                        if (!state.hasTriggeredAction) {
+                                            if (activeSide === 'left') triggerKey('1');
+                                            else if (activeSide === 'right') triggerKey('2');
+                                            else if (activeSide === 'both') triggerKey('3');
+                                            
+                                            // Lock action until pose is released
+                                            state.hasTriggeredAction = true; 
+                                        }
+                                    }
+                                }
+                            } else {
+                                // New pose detected -> Start Timer
+                                state.currentHeldPose = name;
+                                state.poseHoldStartTime = Date.now();
+                                state.hasTriggeredAction = false; // Reset trigger
+                                if(hudLayer) hudLayer.classList.remove('highlight-left', 'highlight-right', 'highlight-both');
                             }
-                        } else if (name.includes("Right") || name.includes("right")) {
-                            if (prob < 0.7) state.rightHandTriggered = false;
                         }
                     }
                 }
+
+                if (!detectedAnyValidPose) {
+                    state.currentHeldPose = null;
+                    state.poseHoldStartTime = 0;
+                    state.hasTriggeredAction = false;
+                    if(hudLayer) hudLayer.classList.remove('highlight-left', 'highlight-right', 'highlight-both');
+                }
+
             } catch (e) {}
         }
 
-        // --- HELPER: SPLINE UPDATE ---
-        function updateSplineCamera(normalizedX, normalizedY) {
+        function updateSplineCamera(normX, normY) {
             if (!window.splineCamera) return;
 
-            if (!window.cameraBaseRotation) {
-                window.cameraBaseRotation = {
-                    x: window.splineCamera.rotation.x,
-                    y: window.splineCamera.rotation.y
+            if (!window.cameraBaseState) {
+                window.cameraBaseState = { 
+                    rx: window.splineCamera.rotation.x, 
+                    ry: window.splineCamera.rotation.y,
+                    px: window.splineCamera.position.x,
+                    py: window.splineCamera.position.y
                 };
             }
 
-            const baseRotX = window.cameraBaseRotation.x;
-            const baseRotY = window.cameraBaseRotation.y;
-            const targetRotY = baseRotY + (normalizedX * 0.08 * PARAMS.xSensitivity); 
-            const targetRotX = baseRotX + (-normalizedY * 0.05 * PARAMS.ySensitivity);
             const lerp = PARAMS.confidenceThreshold;
 
+            const targetRotY = window.cameraBaseState.ry - (normX * 0.08 * PARAMS.xSensitivity); 
+            const targetPosX = window.cameraBaseState.px - (normX * PARAMS.positionSensitivity);
+
+            const targetRotX = window.cameraBaseState.rx + (-normY * 0.05 * PARAMS.ySensitivity);
+            const targetPosY = window.cameraBaseState.py + (-normY * PARAMS.positionSensitivity);
+            
             window.splineCamera.rotation.y += (targetRotY - window.splineCamera.rotation.y) * lerp;
             window.splineCamera.rotation.x += (targetRotX - window.splineCamera.rotation.x) * lerp;
+            
+            window.splineCamera.position.x += (targetPosX - window.splineCamera.position.x) * lerp;
+            window.splineCamera.position.y += (targetPosY - window.splineCamera.position.y) * lerp;
         }
 
-        // START
-        initSpline();
-        initTeachableMachine();
-        initWebcam();
-        initOpenCv();
-
+        startAppFlow();
     </script>
 </body>
 </html>
