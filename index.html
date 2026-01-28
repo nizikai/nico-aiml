@@ -1,24 +1,334 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Face Tracking Camera + Spline</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="styles.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Unlock + Debug</title>
+    
+    <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+    
+    <style>
+        body { margin: 0; overflow: hidden; background: #ffffff; font-family: monospace; }
+
+        /* 1. INTRO OVERLAY */
+        #loader-overlay {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background-color: #ffffff; z-index: 9998;
+            display: flex; justify-content: center; align-items: center;
+            transition: opacity 1s ease-out;
+        }
+        #loader-overlay.fade-out { opacity: 0; pointer-events: none; }
+
+        /* 2. SPLINE SCENE */
+        #canvas3d { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+
+        /* 3. CAMERA UI CONTAINER */
+        #video-overlay {
+            position: fixed; top: 30px; right: 30px;
+            width: 160px; 
+            z-index: 9999;
+            border-radius: 16px; overflow: hidden;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            background: #000; border: 1px solid white;
+            opacity: 0; transform: translateY(-10px);
+            transition: opacity 1s ease, transform 1s ease;
+        }
+        #video-overlay.visible { opacity: 1; transform: translateY(0); }
+
+        #videoFeed { position: absolute; width: 1px; height: 1px; opacity: 0; }
+        #outputCanvas { display: block; width: 100%; height: auto; object-fit: cover; transform: scaleX(-1); }
+
+        /* 4. DEBUG LABELS (RESTORED) */
+        #label-container {
+            width: 100%; background: rgba(0, 0, 0, 0.85); padding: 8px; box-sizing: border-box;
+            color: white; font-size: 10px; display: flex; flex-direction: column; gap: 5px;
+            border-top: 1px solid rgba(255,255,255,0.2);
+        }
+        .label-row { display: flex; justify-content: space-between; align-items: center; }
+        .label-bar-bg { width: 50px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; overflow: hidden; }
+        .label-bar-fill { height: 100%; background: #F67D3E; width: 0%; transition: width 0.1s linear; }
+
+    </style>
+
+    <script>
+        window.appState = { cvLoaded: false };
+        function onOpenCvReady() {
+            window.appState.cvLoaded = true;
+            window.dispatchEvent(new Event('opencv-ready'));
+        }
+    </script>
 </head>
 <body>
-    <div id="video-overlay">
-        <video id="videoFeed" autoplay></video>
-        <canvas id="outputCanvas"></canvas>
+
+    <div id="loader-overlay">
+        <lottie-player id="intro-anim" src="preload.json" background="transparent" speed="1" style="width: 100vmin; height: 100vmin;"></lottie-player>
     </div>
+
+    <div id="video-overlay">
+        <video id="videoFeed" autoplay playsinline muted></video>
+        <canvas id="outputCanvas"></canvas>
+        <div id="label-container" style="display: none;"></div>
+    </div>
+
     <canvas id="canvas3d"></canvas>
 
-        <script src="app.js"></script>
-    <script src="faceTracking.js"></script>
+    <canvas id="processingCanvas" width="320" height="240" style="display:none;"></canvas>
 
     <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+
     <script type="module">
-        import { Application } from 'https://unpkg.com/@splinetool/runtime@1.9.54/build/runtime.js';
-        window.Application = Application;
+        import { Application } from 'https://unpkg.com/@splinetool/runtime@1.9.68/build/runtime.js';
+
+        // --- 1. CONFIG ---
+        const DEBUG_MODE = true; 
+
+        const CONFIG = {
+            FACE_CASCADE_URL: 'haarcascade_frontalface_default.xml',
+            SCENE_URL: 'https://prod.spline.design/yYS1xtlWqP5R7SwT/scene.splinecode',
+            CAMERA_ID: '56c30b36-44df-48b7-89f1-27070018dad0',
+            TM_MODEL_URL: "https://teachablemachine.withgoogle.com/models/odgkAY81j/"
+        };
+
+        const PARAMS = {
+            xSensitivity: 5, ySensitivity: 7, confidenceThreshold: 0.07, scaleFactor: 2 
+        };
+
+        const state = {
+            cvReady: false, splineReady: false, tmReady: false, cameraReady: false,
+            appLoaded: false, experienceStarted: false, rightHandTriggered: false,
+            currentFaceRect: null, inputBlockEndTime: 0
+        };
+
+        // --- 2. TIMING ---
+        let lastFaceTime = 0;
+        let lastPoseTime = 0;
+        const FACE_FPS = 60; 
+        const POSE_FPS = 2; 
+        const faceInterval = 1000 / FACE_FPS;
+        const poseInterval = 1000 / POSE_FPS;
+
+        let video, outputCanvas, outputCtx; 
+        let processingCanvas, processingCtx; 
+        let classifier, tmModel, maxPredictions; 
+
+        // --- 3. INIT FLOW ---
+        async function startAppFlow() {
+            await initWebcam();
+            
+            const anim = document.getElementById('intro-anim');
+            if(anim) anim.play();
+
+            initSpline();
+            initTeachableMachine();
+            initOpenCv();
+
+            setTimeout(() => {
+                const overlay = document.getElementById('video-overlay');
+                if(overlay) overlay.classList.add('visible');
+            }, 5000); // Set back to 5000 for standard flow
+        }
+
+        async function initWebcam() {
+            video = document.getElementById('videoFeed');
+            outputCanvas = document.getElementById('outputCanvas');
+            outputCtx = outputCanvas.getContext('2d', { willReadFrequently: true });
+            processingCanvas = document.getElementById('processingCanvas');
+            processingCtx = processingCanvas.getContext('2d', { willReadFrequently: true });
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+                });
+                video.srcObject = stream;
+                await new Promise(r => { video.onloadedmetadata = () => { video.play(); r(); } });
+
+                outputCanvas.width = video.videoWidth;
+                outputCanvas.height = video.videoHeight;
+                PARAMS.scaleFactor = video.videoWidth / processingCanvas.width;
+                
+                state.cameraReady = true; 
+            } catch (err) { console.error("Webcam Error", err); }
+        }
+
+        async function initSpline() {
+            const canvas = document.getElementById('canvas3d');
+            window.splineApp = new Application(canvas, { controls: false, autoRender: true, autoResize: true });
+            try {
+                await window.splineApp.load(CONFIG.SCENE_URL);
+                let camera = window.splineApp.findObjectById(CONFIG.CAMERA_ID);
+                if (!camera) camera = window.splineApp.getAllObjects().find(obj => obj.type.includes('Camera'));
+                if (camera) { window.splineCamera = camera; if(camera.controls) camera.controls.enabled = false; }
+                state.splineReady = true; checkAppReady();
+            } catch (err) { console.error("Spline Error", err); }
+        }
+
+        async function initTeachableMachine() {
+            try {
+                tmModel = await tmPose.load(CONFIG.TM_MODEL_URL + "model.json", CONFIG.TM_MODEL_URL + "metadata.json");
+                maxPredictions = tmModel.getTotalClasses();
+                
+                // RESTORED: Debug Label Creation
+                if (DEBUG_MODE) {
+                    const labelContainer = document.getElementById("label-container");
+                    labelContainer.style.display = "flex"; 
+                    labelContainer.innerHTML = ''; 
+                    for (let i = 0; i < maxPredictions; i++) {
+                        const div = document.createElement("div"); div.className = "label-row";
+                        div.innerHTML = `<span class="label-text" style="width: 50px;">Load...</span><div class="label-bar-bg"><div class="label-bar-fill"></div></div>`;
+                        labelContainer.appendChild(div);
+                    }
+                }
+                
+                state.tmReady = true; checkAppReady();
+            } catch (err) { console.error("TM Error", err); }
+        }
+
+        async function initOpenCv() {
+            if (!window.appState.cvLoaded) await new Promise(r => window.addEventListener('opencv-ready', r));
+            try {
+                await new Promise(r => { const c = () => (window.cv && window.cv.CascadeClassifier) ? r() : setTimeout(c, 100); c(); });
+                classifier = new cv.CascadeClassifier();
+                try {
+                    const r = await fetch(CONFIG.FACE_CASCADE_URL);
+                    if(!r.ok) throw new Error("XML missing");
+                    const b = await r.arrayBuffer();
+                    cv.FS_createDataFile('/', 'haarcascade_frontalface_default.xml', new Uint8Array(b), true, false, false);
+                    classifier.load('haarcascade_frontalface_default.xml');
+                } catch(e) {}
+                state.cvReady = true; checkAppReady();
+            } catch (err) {}
+        }
+
+        async function checkAppReady() {
+            if (state.cvReady && state.splineReady && state.tmReady && state.cameraReady && !state.appLoaded) {
+                state.appLoaded = true;
+                state.inputBlockEndTime = Date.now() + 6000;
+                requestAnimationFrame(mainLoop);
+            }
+        }
+
+        // --- 4. LOGIC ---
+        function unlockExperience() {
+            state.experienceStarted = true;
+            document.getElementById('loader-overlay').classList.add('fade-out');
+        }
+
+        function triggerKeyU() {
+            if(!state.experienceStarted) return;
+            const down = new KeyboardEvent('keydown', { key: 'u', code: 'KeyU', keyCode: 85, which: 85, bubbles: true });
+            const up = new KeyboardEvent('keyup', { key: 'u', code: 'KeyU', keyCode: 85, which: 85, bubbles: true });
+            window.dispatchEvent(down);
+            if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(down);
+            setTimeout(() => {
+                window.dispatchEvent(up);
+                if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(up);
+            }, 500);
+        }
+
+        function mainLoop(timestamp) {
+            if (!state.appLoaded) return;
+
+            outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+            
+            if (state.currentFaceRect) {
+                outputCtx.beginPath(); outputCtx.lineWidth = 2; outputCtx.strokeStyle = "#F67D3E";
+                outputCtx.rect(state.currentFaceRect.x, state.currentFaceRect.y, state.currentFaceRect.width, state.currentFaceRect.height);
+                outputCtx.stroke();
+            }
+
+            if (timestamp - lastFaceTime > faceInterval) { detectFace(); lastFaceTime = timestamp; }
+            if (timestamp - lastPoseTime > poseInterval) { detectPose(); lastPoseTime = timestamp; }
+            requestAnimationFrame(mainLoop);
+        }
+
+        // --- 5. HELPERS ---
+        function detectFace() {
+            if (!classifier || classifier.empty()) return;
+            try {
+                processingCtx.drawImage(video, 0, 0, processingCanvas.width, processingCanvas.height);
+                let src = cv.imread(processingCanvas);
+                let gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+                let faces = new cv.RectVector();
+                classifier.detectMultiScale(gray, faces, 1.1, 3, 0);
+
+                if (faces.size() > 0) {
+                    let largest = faces.get(0);
+                    let maxArea = largest.width * largest.height;
+                    for (let i = 1; i < faces.size(); i++) {
+                        const f = faces.get(i);
+                        const a = f.width * f.height;
+                        if (a > maxArea) { largest = f; maxArea = a; }
+                    }
+                    state.currentFaceRect = {
+                        x: largest.x * PARAMS.scaleFactor,
+                        y: largest.y * PARAMS.scaleFactor,
+                        width: largest.width * PARAMS.scaleFactor,
+                        height: largest.height * PARAMS.scaleFactor
+                    };
+
+                    if (state.experienceStarted) {
+                        const cx = largest.x + largest.width / 2;
+                        const cy = largest.y + largest.height / 2;
+                        updateSplineCamera((cx / processingCanvas.width) * 2 - 1, (cy / processingCanvas.height) * 2 - 1);
+                    }
+                }
+                src.delete(); gray.delete(); faces.delete();
+            } catch (e) {}
+        }
+
+        async function detectPose() {
+            if (!tmModel || Date.now() < state.inputBlockEndTime) return;
+            try {
+                const { pose, posenetOutput } = await tmModel.estimatePose(video);
+                const prediction = await tmModel.predict(posenetOutput);
+                const container = document.getElementById("label-container"); // RESTORED Reference
+                
+                for (let i = 0; i < maxPredictions; i++) {
+                    const prob = prediction[i].probability;
+                    let name = prediction[i].className;
+                    if (name.includes("Left")) name = name.replace("Left", "Right");
+                    else if (name.includes("Right")) name = name.replace("Right", "Left");
+
+                    // RESTORED: Debug UI Update
+                    if (DEBUG_MODE && container && container.children[i]) {
+                        const row = container.children[i];
+                        const pct = (prob * 100).toFixed(0);
+                        const txt = row.querySelector('.label-text');
+                        txt.innerText = `${name} ${pct}%`;
+                        row.querySelector('.label-bar-fill').style.width = `${pct}%`;
+                        txt.style.color = prob > 0.7 ? '#F67D3E' : '#ccc';
+                        txt.style.fontWeight = prob > 0.7 ? 'bold' : 'normal';
+                    }
+
+                    // LOGIC
+                    if (!state.experienceStarted) {
+                        if ((name.includes("Right") || name.includes("right")) && prob > 0.9) unlockExperience();
+                    } else {
+                        if ((name.includes("Right") || name.includes("right")) && prob > 0.9) {
+                            if (!state.rightHandTriggered) { triggerKeyU(); state.rightHandTriggered = true; }
+                        } else if (name.includes("Right") || name.includes("right")) {
+                            if (prob < 0.9) state.rightHandTriggered = false;
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
+
+        function updateSplineCamera(normX, normY) {
+            if (!window.splineCamera) return;
+            if (!window.cameraBaseRotation) window.cameraBaseRotation = { x: window.splineCamera.rotation.x, y: window.splineCamera.rotation.y };
+            const lerp = PARAMS.confidenceThreshold;
+            const ty = window.cameraBaseRotation.y + (normX * 0.08 * PARAMS.xSensitivity); 
+            const tx = window.cameraBaseRotation.x + (-normY * 0.05 * PARAMS.ySensitivity);
+            window.splineCamera.rotation.y += (ty - window.splineCamera.rotation.y) * lerp;
+            window.splineCamera.rotation.x += (tx - window.splineCamera.rotation.x) * lerp;
+        }
+
+        // --- START ---
+        startAppFlow();
     </script>
 </body>
 </html>
