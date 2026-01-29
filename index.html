@@ -120,6 +120,20 @@
             cooldownTimer: 5000 
         };
 
+        // --- CONFIGURATION ---
+        
+        // 1. SEGMENT ORDER (Both Hands)
+        // Order: N -> M -> B -> Repeat
+        const MODE_SEQUENCE = ['n', 'm', 'b'];
+
+        // 2. SCROLL LISTS (Left/Right)
+        // Corresponds to [N, M, B] indices
+        const MODE_SCROLL_LISTS = [
+            ['j', 'k', 'n'], // Index 0: Mode N
+            ['i', 'o', 'm'], // Index 1: Mode M
+            ['x', 'c', 'b']  // Index 2: Mode B
+        ];
+
         const state = {
             cvReady: false, splineReady: false, tmReady: false, cameraReady: false,
             appLoaded: false, experienceStarted: false, 
@@ -128,30 +142,12 @@
             poseHoldStartTime: 0, currentHeldPose: null,
             ignoreInputsUntil: 0, hasTriggeredAction: false,
             
-            // --- STATE MACHINE ---
-            // Tracks which Mode is active: 0=N, 1=M, 2=B
-            // UPDATED: Start at 2 (Mode B)
-            activeModeIndex: 2, 
-            
-            // Tracks position within the sub-list (scrolling)
-            scrollIndex: 0,
+            // STATE MACHINE
+            activeModeIndex: 2, // Starts at 2 (Mode B)
+            scrollIndex: 2,     // Starts at 2 (Default value for Mode B is 'b')
             
             nextSequenceTime: 0 
         };
-
-        // --- 1. MODE CYCLE (Both Hands) ---
-        // Order: N -> M -> B -> Repeat
-        const MODE_SEQUENCE = ['n', 'm', 'b'];
-
-        // --- 2. SCROLL LISTS (Left/Right) ---
-        // Index 0 (Mode N): J -> K -> N -> Repeat
-        // Index 1 (Mode M): I -> O -> M -> Repeat
-        // Index 2 (Mode B): X -> C -> B -> Repeat
-        const MODE_SCROLL_LISTS = [
-            ['j', 'k', 'n'], 
-            ['i', 'o', 'm'], 
-            ['x', 'c', 'b']  
-        ];
 
         let lastFaceTime = 0, lastPoseTime = 0;
         const FACE_FPS = 30, POSE_FPS = 15;
@@ -393,18 +389,16 @@
                                         if (activeSide === 'right') unlockExperience();
                                     } else {
                                         
-                                        // --- LOGIC START ---
+                                        // --- LOGIC CORE ---
                                         
-                                        // 1. BOTH HANDS: CYCLE MODES (N -> M -> B)
+                                        // 1. BOTH HANDS: CYCLE SEGMENTS (N -> M -> B)
                                         if (activeSide === 'both') {
                                             if (Date.now() > state.nextSequenceTime) {
-                                                state.activeModeIndex++; // Advance to next mode
-                                                state.scrollIndex = 0;   // Reset scroll for new mode
+                                                state.activeModeIndex++; // Go Next
+                                                state.scrollIndex = 2;   // Reset to "Default" (Last Item) of new mode
                                                 
-                                                // Calculate wrapped index (0, 1, 2)
-                                                // 0=N, 1=M, 2=B
-                                                const modeIndex = state.activeModeIndex % MODE_SEQUENCE.length;
-                                                const newModeChar = MODE_SEQUENCE[modeIndex];
+                                                const sequenceModeIndex = state.activeModeIndex % MODE_SEQUENCE.length;
+                                                const newModeChar = MODE_SEQUENCE[sequenceModeIndex];
                                                 
                                                 triggerSafeSequence(newModeChar);
                                                 
@@ -412,9 +406,8 @@
                                             }
                                         }
                                         
-                                        // 2. LEFT/RIGHT: SCROLL IN CURRENT MODE
+                                        // 2. LEFT/RIGHT: SCROLL IN CURRENT SEGMENT
                                         else if (!state.hasTriggeredAction) {
-                                            // Identify Current List
                                             const currentModeIndex = state.activeModeIndex % MODE_SEQUENCE.length;
                                             const currentList = MODE_SCROLL_LISTS[currentModeIndex];
                                             
@@ -422,7 +415,6 @@
                                             if (activeSide === 'right') direction = 1;  // Next
                                             if (activeSide === 'left') direction = -1;  // Prev
 
-                                            // Calculate New Scroll Index (Circular)
                                             let newIndex = state.scrollIndex + direction;
                                             if (newIndex < 0) newIndex = currentList.length - 1;
                                             if (newIndex >= currentList.length) newIndex = 0;
