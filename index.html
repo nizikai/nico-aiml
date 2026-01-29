@@ -23,9 +23,8 @@
         }
         #loader-overlay.fade-out { opacity: 0; pointer-events: none; }
 
-        #canvas3d { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #canvas3d { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; outline: none; }
 
-        /* --- VIDEO CONTAINER --- */
         #video-overlay {
             position: fixed; top: 30px; right: 30px;
             width: 160px; height: 120px;
@@ -43,19 +42,16 @@
         #videoFeed { position: absolute; width: 1px; height: 1px; opacity: 0; }
         #outputCanvas { display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 
-        /* --- HUD LAYER --- */
         #hud-layer {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             pointer-events: none; z-index: 10;
             box-sizing: border-box;
             transition: box-shadow 0.2s ease-out;
         }
-        /* VISUAL FEEDBACK */
         #hud-layer.highlight-left { box-shadow: inset 15px 0 0 0 #F67D3E; }
         #hud-layer.highlight-right { box-shadow: inset -15px 0 0 0 #F67D3E; }
         #hud-layer.highlight-both { box-shadow: inset 0 0 0 8px #F67D3E; }
 
-        /* --- PLACEHOLDER / ERROR MESSAGE --- */
         #camera-msg {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             background: #222; color: #888;
@@ -100,7 +96,7 @@
         <div id="label-container" style="display: none;"></div>
     </div>
 
-    <canvas id="canvas3d"></canvas>
+    <canvas id="canvas3d" tabindex="1"></canvas>
     <canvas id="processingCanvas" width="160" height="120" style="display:none;"></canvas>
 
     <script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
@@ -118,14 +114,9 @@
         };
 
         const PARAMS = {
-            xSensitivity: 5, 
-            ySensitivity: 7, 
-            positionSensitivity: 100,
-            confidenceThreshold: 0.25, 
-            scaleFactor: 4,
-            
-            // --- UPDATED: 0.5s Timer (Snappy) ---
-            validityTimer: 500, 
+            xSensitivity: 5, ySensitivity: 7, positionSensitivity: 50,
+            confidenceThreshold: 0.2, scaleFactor: 4,
+            validityTimer: 100, // Instant
             cooldownTimer: 5000 
         };
 
@@ -134,19 +125,36 @@
             appLoaded: false, experienceStarted: false, 
             currentFaceRect: null, inputBlockEndTime: 0,
             
-            // Interaction States
-            poseHoldStartTime: 0,
-            currentHeldPose: null,
+            poseHoldStartTime: 0, currentHeldPose: null,
+            ignoreInputsUntil: 0, hasTriggeredAction: false,
             
-            // Game Phase States
-            ignoreInputsUntil: 0,   // For the 5s cooldown
-            hasTriggeredAction: false // Ensures we only trigger once per hold
+            // --- STATE MACHINE ---
+            // Tracks which Mode is active: 0=N, 1=M, 2=B
+            // UPDATED: Start at 2 (Mode B)
+            activeModeIndex: 2, 
+            
+            // Tracks position within the sub-list (scrolling)
+            scrollIndex: 0,
+            
+            nextSequenceTime: 0 
         };
 
-        let lastFaceTime = 0;
-        let lastPoseTime = 0;
-        const FACE_FPS = 24; 
-        const POSE_FPS = 4;
+        // --- 1. MODE CYCLE (Both Hands) ---
+        // Order: N -> M -> B -> Repeat
+        const MODE_SEQUENCE = ['n', 'm', 'b'];
+
+        // --- 2. SCROLL LISTS (Left/Right) ---
+        // Index 0 (Mode N): J -> K -> N -> Repeat
+        // Index 1 (Mode M): I -> O -> M -> Repeat
+        // Index 2 (Mode B): X -> C -> B -> Repeat
+        const MODE_SCROLL_LISTS = [
+            ['j', 'k', 'n'], 
+            ['i', 'o', 'm'], 
+            ['x', 'c', 'b']  
+        ];
+
+        let lastFaceTime = 0, lastPoseTime = 0;
+        const FACE_FPS = 30, POSE_FPS = 15;
         const faceInterval = 1000 / FACE_FPS;
         const poseInterval = 1000 / POSE_FPS;
 
@@ -159,17 +167,10 @@
             await initWebcam();
             const anim = document.getElementById('intro-anim');
             if(anim) anim.play();
-            
             hudLayer = document.getElementById('hud-layer');
             cameraMsg = document.getElementById('camera-msg');
-
-            initSpline();
-            initTeachableMachine();
-            initOpenCv();
-            setTimeout(() => {
-                const overlay = document.getElementById('video-overlay');
-                if(overlay) overlay.classList.add('visible');
-            }, 5000);
+            initSpline(); initTeachableMachine(); initOpenCv();
+            setTimeout(() => { document.getElementById('video-overlay')?.classList.add('visible'); }, 5000);
         }
 
         async function initWebcam() {
@@ -179,25 +180,17 @@
             processingCanvas = document.getElementById('processingCanvas');
             processingCtx = processingCanvas.getContext('2d', { willReadFrequently: true });
             cameraMsg = document.getElementById('camera-msg');
-
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } });
                 video.srcObject = stream;
                 await new Promise(r => { video.onloadedmetadata = () => { video.play(); r(); } });
-
-                outputCanvas.width = video.videoWidth;
-                outputCanvas.height = video.videoHeight;
+                outputCanvas.width = video.videoWidth; outputCanvas.height = video.videoHeight;
                 PARAMS.scaleFactor = video.videoWidth / processingCanvas.width;
                 state.cameraReady = true; 
                 if(cameraMsg) cameraMsg.classList.add('hidden');
             } catch (err) { 
                 console.error("Webcam Error", err);
-                if(cameraMsg) {
-                    cameraMsg.innerHTML = "<span>Please enable Camera.<br>to continue.</span>";
-                    cameraMsg.classList.add('error');
-                }
+                if(cameraMsg) { cameraMsg.innerHTML = "<span>Please enable Camera.<br>to continue.</span>"; cameraMsg.classList.add('error'); }
             }
         }
 
@@ -249,48 +242,67 @@
         async function checkAppReady() {
             if (state.cvReady && state.splineReady && state.tmReady && state.cameraReady && !state.appLoaded) {
                 state.appLoaded = true;
-                // Initial block to let everything settle
                 state.inputBlockEndTime = Date.now() + 6000;
                 requestAnimationFrame(mainLoop);
             }
         }
 
-        // --- PHASE 2: UNLOCK & START COOLDOWN ---
         function unlockExperience() {
             state.experienceStarted = true;
             document.getElementById('loader-overlay').classList.add('fade-out');
             
-            // RULE 2: Ignore all input for 5 seconds after unlock
+            // 5-Sec Ignore Timer
             state.ignoreInputsUntil = Date.now() + PARAMS.cooldownTimer;
-            console.log("UNLOCKED! Ignoring inputs for 5s...");
+            
+            // Clear HUD immediately
+            if(hudLayer) hudLayer.classList.remove('highlight-left', 'highlight-right', 'highlight-both');
         }
 
-        // --- GENERIC KEY TRIGGER FUNCTION ---
-        // triggers '1', '2', or '3'
-        function triggerKey(keyChar) {
-            const keyCodeMap = { '1': 49, '2': 50, '3': 51 };
-            const codeMap = { '1': 'Digit1', '2': 'Digit2', '3': 'Digit3' };
-            
-            const kCode = keyCodeMap[keyChar];
-            const code = codeMap[keyChar];
+        // --- HELPER: SAFE SEQUENCE TRIGGER (0 -> 0 -> KEY) ---
+        function triggerSafeSequence(finalChar) {
+            // T=0ms: Hit 0
+            triggerKey('0');
+            // T=100ms: Hit 0 (Safety)
+            setTimeout(() => { triggerKey('0'); }, 100);
+            // T=500ms: Hit Final Char
+            setTimeout(() => { triggerKey(finalChar); }, 500);
+        }
 
-            const down = new KeyboardEvent('keydown', { key: keyChar, code: code, keyCode: kCode, which: kCode, bubbles: true });
-            const up = new KeyboardEvent('keyup', { key: keyChar, code: code, keyCode: kCode, which: kCode, bubbles: true });
+        function triggerKey(keyInput) {
+            const keyChar = keyInput.toLowerCase(); 
+            const codeMap = {
+                '0': 'Digit0', 
+                'n': 'KeyN', 'm': 'KeyM', 'b': 'KeyB',
+                'j': 'KeyJ', 'k': 'KeyK',
+                'i': 'KeyI', 'o': 'KeyO',
+                'x': 'KeyX', 'c': 'KeyC'
+            };
+            const code = codeMap[keyChar];
+            if (!code) return;
+
+            const eventObj = {
+                key: keyChar, code: code, 
+                keyCode: keyChar.toUpperCase().charCodeAt(0),
+                bubbles: true, cancelable: true, view: window
+            };
+
+            const down = new KeyboardEvent('keydown', eventObj);
+            const up = new KeyboardEvent('keyup', eventObj);
             
+            const canvas = document.getElementById('canvas3d');
+            if(canvas) { canvas.focus(); canvas.dispatchEvent(down); }
             window.dispatchEvent(down);
-            if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(down);
+            document.dispatchEvent(down);
             
             setTimeout(() => {
+                if(canvas) canvas.dispatchEvent(up);
                 window.dispatchEvent(up);
-                if(document.getElementById('canvas3d')) document.getElementById('canvas3d').dispatchEvent(up);
-            }, 100); // Quick tap
-            
-            console.log(`TRIGGERED KEY: ${keyChar}`);
+                document.dispatchEvent(up);
+            }, 250); 
         }
 
         function mainLoop(timestamp) {
             if (!state.appLoaded) return;
-
             outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
             
             if (state.currentFaceRect) {
@@ -312,27 +324,20 @@
                 let gray = new cv.Mat();
                 cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
                 let faces = new cv.RectVector();
-                
                 classifier.detectMultiScale(gray, faces, 1.1, 2, 0);
-
                 if (faces.size() > 0) {
                     let largest = faces.get(0);
                     let maxArea = largest.width * largest.height;
                     for (let i = 1; i < faces.size(); i++) {
-                        const f = faces.get(i);
-                        const a = f.width * f.height;
+                        const f = faces.get(i); const a = f.width * f.height;
                         if (a > maxArea) { largest = f; maxArea = a; }
                     }
                     state.currentFaceRect = {
-                        x: largest.x * PARAMS.scaleFactor,
-                        y: largest.y * PARAMS.scaleFactor,
-                        width: largest.width * PARAMS.scaleFactor,
-                        height: largest.height * PARAMS.scaleFactor
+                        x: largest.x * PARAMS.scaleFactor, y: largest.y * PARAMS.scaleFactor,
+                        width: largest.width * PARAMS.scaleFactor, height: largest.height * PARAMS.scaleFactor
                     };
-
                     if (state.experienceStarted) {
-                        const cx = largest.x + largest.width / 2;
-                        const cy = largest.y + largest.height / 2;
+                        const cx = largest.x + largest.width / 2; const cy = largest.y + largest.height / 2;
                         updateSplineCamera((cx / processingCanvas.width) * 2 - 1, (cy / processingCanvas.height) * 2 - 1);
                     }
                 }
@@ -343,21 +348,20 @@
         async function detectPose() {
             if (!tmModel || Date.now() < state.inputBlockEndTime) return;
             
-            // RULE 2 CHECK: If inside 5s cooldown, do nothing
-            if (state.experienceStarted && Date.now() < state.ignoreInputsUntil) return;
+            if (state.experienceStarted && Date.now() < state.ignoreInputsUntil) {
+                if(hudLayer) hudLayer.classList.remove('highlight-left', 'highlight-right', 'highlight-both');
+                return;
+            }
 
             try {
                 const { pose, posenetOutput } = await tmModel.estimatePose(video);
                 const prediction = await tmModel.predict(posenetOutput);
                 const container = document.getElementById("label-container");
-                
-                let detectedAnyValidPose = false;
-                let activeSide = null; 
+                let detectedAnyValidPose = false; let activeSide = null; 
 
                 for (let i = 0; i < maxPredictions; i++) {
                     const prob = prediction[i].probability;
                     let name = prediction[i].className;
-                    // Mirroring Logic
                     if (name.includes("Left")) name = name.replace("Left", "Right");
                     else if (name.includes("Right")) name = name.replace("Right", "Left");
 
@@ -376,90 +380,91 @@
 
                         if (activeSide) {
                             detectedAnyValidPose = true;
-
-                            // 1. Check if we are holding the SAME pose as previous frame
                             if (state.currentHeldPose === name) {
                                 const timeHeld = Date.now() - state.poseHoldStartTime;
-                                
-                                // RULE 1: Must hold for 0.5s (PARAMS.validityTimer)
                                 if (timeHeld > PARAMS.validityTimer) {
-                                    
-                                    // VISUAL FEEDBACK (Only if valid)
                                     if (hudLayer) {
-                                        if (activeSide === 'left') {
-                                            hudLayer.classList.add('highlight-left');
-                                            hudLayer.classList.remove('highlight-right', 'highlight-both');
-                                        } else if (activeSide === 'right') {
-                                            hudLayer.classList.add('highlight-right');
-                                            hudLayer.classList.remove('highlight-left', 'highlight-both');
-                                        } else if (activeSide === 'both') {
-                                            hudLayer.classList.add('highlight-both');
-                                            hudLayer.classList.remove('highlight-left', 'highlight-right');
-                                        }
+                                        if (activeSide === 'left') { hudLayer.classList.add('highlight-left'); hudLayer.classList.remove('highlight-right', 'highlight-both'); }
+                                        else if (activeSide === 'right') { hudLayer.classList.add('highlight-right'); hudLayer.classList.remove('highlight-left', 'highlight-both'); }
+                                        else if (activeSide === 'both') { hudLayer.classList.add('highlight-both'); hudLayer.classList.remove('highlight-left', 'highlight-right'); }
                                     }
 
-                                    // ACTION LOGIC
                                     if (!state.experienceStarted) {
-                                        // PHASE 1: UNLOCK (Only Right Hand valid)
-                                        if (activeSide === 'right') {
-                                            unlockExperience();
-                                        }
+                                        if (activeSide === 'right') unlockExperience();
                                     } else {
-                                        // PHASE 3: INTERACTION (Prevent rapid firing with hasTriggeredAction)
-                                        if (!state.hasTriggeredAction) {
-                                            if (activeSide === 'left') triggerKey('1');
-                                            else if (activeSide === 'right') triggerKey('2');
-                                            else if (activeSide === 'both') triggerKey('3');
+                                        
+                                        // --- LOGIC START ---
+                                        
+                                        // 1. BOTH HANDS: CYCLE MODES (N -> M -> B)
+                                        if (activeSide === 'both') {
+                                            if (Date.now() > state.nextSequenceTime) {
+                                                state.activeModeIndex++; // Advance to next mode
+                                                state.scrollIndex = 0;   // Reset scroll for new mode
+                                                
+                                                // Calculate wrapped index (0, 1, 2)
+                                                // 0=N, 1=M, 2=B
+                                                const modeIndex = state.activeModeIndex % MODE_SEQUENCE.length;
+                                                const newModeChar = MODE_SEQUENCE[modeIndex];
+                                                
+                                                triggerSafeSequence(newModeChar);
+                                                
+                                                state.nextSequenceTime = Date.now() + 2000;
+                                            }
+                                        }
+                                        
+                                        // 2. LEFT/RIGHT: SCROLL IN CURRENT MODE
+                                        else if (!state.hasTriggeredAction) {
+                                            // Identify Current List
+                                            const currentModeIndex = state.activeModeIndex % MODE_SEQUENCE.length;
+                                            const currentList = MODE_SCROLL_LISTS[currentModeIndex];
                                             
-                                            // Lock action until pose is released
+                                            let direction = 0;
+                                            if (activeSide === 'right') direction = 1;  // Next
+                                            if (activeSide === 'left') direction = -1;  // Prev
+
+                                            // Calculate New Scroll Index (Circular)
+                                            let newIndex = state.scrollIndex + direction;
+                                            if (newIndex < 0) newIndex = currentList.length - 1;
+                                            if (newIndex >= currentList.length) newIndex = 0;
+                                            
+                                            state.scrollIndex = newIndex;
+                                            const charToFire = currentList[state.scrollIndex];
+
+                                            triggerSafeSequence(charToFire);
                                             state.hasTriggeredAction = true; 
                                         }
                                     }
                                 }
                             } else {
-                                // New pose detected -> Start Timer
-                                state.currentHeldPose = name;
-                                state.poseHoldStartTime = Date.now();
-                                state.hasTriggeredAction = false; // Reset trigger
+                                state.currentHeldPose = name; state.poseHoldStartTime = Date.now(); state.hasTriggeredAction = false; 
                                 if(hudLayer) hudLayer.classList.remove('highlight-left', 'highlight-right', 'highlight-both');
                             }
                         }
                     }
                 }
-
                 if (!detectedAnyValidPose) {
-                    state.currentHeldPose = null;
-                    state.poseHoldStartTime = 0;
-                    state.hasTriggeredAction = false;
+                    state.currentHeldPose = null; state.poseHoldStartTime = 0; state.hasTriggeredAction = false;
                     if(hudLayer) hudLayer.classList.remove('highlight-left', 'highlight-right', 'highlight-both');
                 }
-
             } catch (e) {}
         }
 
         function updateSplineCamera(normX, normY) {
             if (!window.splineCamera) return;
-
             if (!window.cameraBaseState) {
                 window.cameraBaseState = { 
-                    rx: window.splineCamera.rotation.x, 
-                    ry: window.splineCamera.rotation.y,
-                    px: window.splineCamera.position.x,
-                    py: window.splineCamera.position.y
+                    rx: window.splineCamera.rotation.x, ry: window.splineCamera.rotation.y,
+                    px: window.splineCamera.position.x, py: window.splineCamera.position.y
                 };
             }
-
             const lerp = PARAMS.confidenceThreshold;
-
             const targetRotY = window.cameraBaseState.ry - (normX * 0.08 * PARAMS.xSensitivity); 
             const targetPosX = window.cameraBaseState.px - (normX * PARAMS.positionSensitivity);
-
             const targetRotX = window.cameraBaseState.rx + (-normY * 0.05 * PARAMS.ySensitivity);
             const targetPosY = window.cameraBaseState.py + (-normY * PARAMS.positionSensitivity);
             
             window.splineCamera.rotation.y += (targetRotY - window.splineCamera.rotation.y) * lerp;
             window.splineCamera.rotation.x += (targetRotX - window.splineCamera.rotation.x) * lerp;
-            
             window.splineCamera.position.x += (targetPosX - window.splineCamera.position.x) * lerp;
             window.splineCamera.position.y += (targetPosY - window.splineCamera.position.y) * lerp;
         }
