@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3-Phase Interaction Logic</title>
+    <title>Nico Prasetyo | AIML Exploration</title>
+    
+    <link rel="icon" type="image/png" href="assets/icon.png">
+    <link rel="apple-touch-icon" href="assets/icon.png">
     
     <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
@@ -121,8 +124,9 @@
             confidenceThreshold: 0.25, 
             scaleFactor: 4,
             
+            // --- UPDATED: 0.5s Timer (Snappy) ---
             validityTimer: 500, 
-            cooldownTimer: 5000  // 5 seconds
+            cooldownTimer: 5000 
         };
 
         const state = {
@@ -141,8 +145,8 @@
 
         let lastFaceTime = 0;
         let lastPoseTime = 0;
-        const FACE_FPS = 15; 
-        const POSE_FPS = 10;
+        const FACE_FPS = 24; 
+        const POSE_FPS = 4;
         const faceInterval = 1000 / FACE_FPS;
         const poseInterval = 1000 / POSE_FPS;
 
@@ -377,7 +381,7 @@
                             if (state.currentHeldPose === name) {
                                 const timeHeld = Date.now() - state.poseHoldStartTime;
                                 
-                                // RULE 1: Must hold for 1.5s (PARAMS.validityTimer)
+                                // RULE 1: Must hold for 0.5s (PARAMS.validityTimer)
                                 if (timeHeld > PARAMS.validityTimer) {
                                     
                                     // VISUAL FEEDBACK (Only if valid)
