@@ -72,6 +72,23 @@
         .label-row { display: flex; justify-content: space-between; align-items: center; }
         .label-bar-bg { width: 50px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; overflow: hidden; }
         .label-bar-fill { height: 100%; background: #F67D3E; width: 0%; transition: width 0.1s linear; }
+
+        #mobile-notice {
+            display: none;
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: #ffffff; z-index: 99999;
+            flex-direction: column; justify-content: center; align-items: center;
+            text-align: center; padding: 40px; box-sizing: border-box;
+            font-family: monospace;
+        }
+        #mobile-notice .notice-icon { font-size: 48px; margin-bottom: 24px; }
+        #mobile-notice h2 { font-size: 18px; font-weight: bold; margin: 0 0 12px; color: #111; }
+        #mobile-notice p { font-size: 13px; color: #666; line-height: 1.6; margin: 0; }
+        #mobile-notice .notice-url { margin-top: 20px; font-size: 12px; color: #F67D3E; word-break: break-all; }
+
+        @media (max-width: 768px) {
+            #mobile-notice { display: flex; }
+        }
     </style>
 
     <script>
@@ -83,6 +100,11 @@
     </script>
 </head>
 <body>
+
+    <div id="mobile-notice">
+        <h2>Best viewed on desktop</h2>
+        <p>This experience is optimized for a desktop browser.</p>
+    </div>
 
     <div id="loader-overlay">
         <lottie-player id="intro-anim" src="preload.json" background="transparent" speed="1" style="width: 115vmin; height: 115vmin;"></lottie-player>
@@ -149,15 +171,19 @@
             nextSequenceTime: 0 
         };
 
-        let lastFaceTime = 0, lastPoseTime = 0;
-        const FACE_FPS = 30, POSE_FPS = 15;
+        let lastFaceTime = 0, lastPoseTime = 0, lastDrawTime = 0;
+        const FACE_FPS = 20, POSE_FPS = 15, DRAW_FPS = 30;
         const faceInterval = 1000 / FACE_FPS;
         const poseInterval = 1000 / POSE_FPS;
+        const drawInterval = 1000 / DRAW_FPS;
+
+        // Smooth camera target — updated by face detection, applied every rAF frame
+        const cameraTarget = { normX: 0, normY: 0 };
 
         let video, outputCanvas, outputCtx; 
         let processingCanvas, processingCtx; 
         let classifier, tmModel, maxPredictions; 
-        let hudLayer, cameraMsg;
+        let hudLayer, cameraMsg, labelContainer;
 
         async function startAppFlow() {
             await initWebcam();
@@ -165,6 +191,7 @@
             if(anim) anim.play();
             hudLayer = document.getElementById('hud-layer');
             cameraMsg = document.getElementById('camera-msg');
+            labelContainer = document.getElementById('label-container');
             initSpline(); initTeachableMachine(); initOpenCv();
             setTimeout(() => { document.getElementById('video-overlay')?.classList.add('visible'); }, 5000);
         }
@@ -264,6 +291,10 @@
             setTimeout(() => { triggerKey(finalChar); }, 500);
         }
 
+        // Cache canvas ref for key dispatch
+        let _canvas3d = null;
+        function getCanvas3d() { return _canvas3d || (_canvas3d = document.getElementById('canvas3d')); }
+
         function triggerKey(keyInput) {
             const keyChar = keyInput.toLowerCase(); 
             const codeMap = {
@@ -285,27 +316,31 @@
             const down = new KeyboardEvent('keydown', eventObj);
             const up = new KeyboardEvent('keyup', eventObj);
             
-            const canvas = document.getElementById('canvas3d');
+            const canvas = getCanvas3d();
             if(canvas) { canvas.focus(); canvas.dispatchEvent(down); }
             window.dispatchEvent(down);
-            document.dispatchEvent(down);
             
             setTimeout(() => {
                 if(canvas) canvas.dispatchEvent(up);
                 window.dispatchEvent(up);
-                document.dispatchEvent(up);
             }, 250); 
         }
 
         function mainLoop(timestamp) {
             if (!state.appLoaded) return;
-            outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
-            
-            if (state.currentFaceRect) {
-                outputCtx.beginPath(); outputCtx.lineWidth = 3; outputCtx.strokeStyle = "#F67D3E";
-                outputCtx.rect(state.currentFaceRect.x, state.currentFaceRect.y, state.currentFaceRect.width, state.currentFaceRect.height);
-                outputCtx.stroke();
+
+            if (timestamp - lastDrawTime > drawInterval) {
+                outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+                if (state.currentFaceRect) {
+                    outputCtx.beginPath(); outputCtx.lineWidth = 3; outputCtx.strokeStyle = "#F67D3E";
+                    outputCtx.rect(state.currentFaceRect.x, state.currentFaceRect.y, state.currentFaceRect.width, state.currentFaceRect.height);
+                    outputCtx.stroke();
+                }
+                lastDrawTime = timestamp;
             }
+
+            // Apply camera lerp every frame for smooth motion
+            if (state.experienceStarted) updateSplineCamera(cameraTarget.normX, cameraTarget.normY);
 
             if (timestamp - lastFaceTime > faceInterval) { detectFace(); lastFaceTime = timestamp; }
             if (timestamp - lastPoseTime > poseInterval) { detectPose(); lastPoseTime = timestamp; }
@@ -334,7 +369,9 @@
                     };
                     if (state.experienceStarted) {
                         const cx = largest.x + largest.width / 2; const cy = largest.y + largest.height / 2;
-                        updateSplineCamera((cx / processingCanvas.width) * 2 - 1, (cy / processingCanvas.height) * 2 - 1);
+                        // Store normalized target — mainLoop applies the lerp every frame
+                        cameraTarget.normX = (cx / processingCanvas.width) * 2 - 1;
+                        cameraTarget.normY = (cy / processingCanvas.height) * 2 - 1;
                     }
                 }
                 src.delete(); gray.delete(); faces.delete();
@@ -352,7 +389,6 @@
             try {
                 const { pose, posenetOutput } = await tmModel.estimatePose(video);
                 const prediction = await tmModel.predict(posenetOutput);
-                const container = document.getElementById("label-container");
                 let detectedAnyValidPose = false; let activeSide = null; 
 
                 for (let i = 0; i < maxPredictions; i++) {
@@ -361,8 +397,8 @@
                     if (name.includes("Left")) name = name.replace("Left", "Right");
                     else if (name.includes("Right")) name = name.replace("Right", "Left");
 
-                    if (DEBUG_MODE && container && container.children[i]) {
-                        const row = container.children[i];
+                    if (DEBUG_MODE && labelContainer && labelContainer.children[i]) {
+                        const row = labelContainer.children[i];
                         const pct = (prob * 100).toFixed(0);
                         const txt = row.querySelector('.label-text');
                         txt.innerText = `${name} ${pct}%`;
@@ -449,7 +485,7 @@
                     px: window.splineCamera.position.x, py: window.splineCamera.position.y
                 };
             }
-            const lerp = PARAMS.confidenceThreshold;
+            const lerp = 0.08; // Per-frame lerp at ~60fps — feels smooth without lag
             const targetRotY = window.cameraBaseState.ry - (normX * 0.08 * PARAMS.xSensitivity); 
             const targetPosX = window.cameraBaseState.px - (normX * PARAMS.positionSensitivity);
             const targetRotX = window.cameraBaseState.rx + (-normY * 0.05 * PARAMS.ySensitivity);
