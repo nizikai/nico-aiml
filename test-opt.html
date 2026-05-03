@@ -497,7 +497,10 @@
             window.splineCamera.position.y += (targetPosY - window.splineCamera.position.y) * lerp;
         }
 
-        startAppFlow();
+        // Don't start on mobile — show notice instead
+        if (window.innerWidth > 768) {
+            startAppFlow();
+        }
     </script>
 </body>
 </html>
